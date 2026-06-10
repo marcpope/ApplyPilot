@@ -294,6 +294,41 @@ def reset_failed() -> int:
 # Per-job execution
 # ---------------------------------------------------------------------------
 
+# Gmail MCP tools the agent must never use (drafts, deletes, label/filter admin).
+_GMAIL_DISALLOWED = (
+    "mcp__gmail__draft_email,mcp__gmail__modify_email,"
+    "mcp__gmail__delete_email,mcp__gmail__download_attachment,"
+    "mcp__gmail__batch_modify_emails,mcp__gmail__batch_delete_emails,"
+    "mcp__gmail__create_label,mcp__gmail__update_label,"
+    "mcp__gmail__delete_label,mcp__gmail__get_or_create_label,"
+    "mcp__gmail__list_email_labels,mcp__gmail__create_filter,"
+    "mcp__gmail__list_filters,mcp__gmail__get_filter,"
+    "mcp__gmail__delete_filter"
+)
+
+
+def _build_claude_cmd(model: str, mcp_config_path: str, dry_run: bool = False) -> list[str]:
+    """Build the `claude` subprocess argv for the apply agent.
+
+    The agent runs with bypassPermissions, so the disallowed-tools list is the
+    only guard. In dry-run mode the Gmail send tool is also disallowed so the
+    agent cannot send a real application email.
+    """
+    disallowed = _GMAIL_DISALLOWED
+    if dry_run:
+        disallowed += ",mcp__gmail__send_email"
+    return [
+        "claude",
+        "--model", model,
+        "-p",
+        "--mcp-config", mcp_config_path,
+        "--permission-mode", "bypassPermissions",
+        "--no-session-persistence",
+        "--disallowedTools", disallowed,
+        "--output-format", "stream-json",
+        "--verbose", "-",
+    ]
+
 def run_job(job: dict, port: int, worker_id: int = 0,
             model: str = "sonnet", dry_run: bool = False) -> tuple[str, int]:
     """Spawn a Claude Code session for one job application.
@@ -322,26 +357,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     mcp_config_path.write_text(json.dumps(_make_mcp_config(port)), encoding="utf-8")
 
     # Build claude command
-    cmd = [
-        "claude",
-        "--model", model,
-        "-p",
-        "--mcp-config", str(mcp_config_path),
-        "--permission-mode", "bypassPermissions",
-        "--no-session-persistence",
-        "--disallowedTools", (
-            "mcp__gmail__draft_email,mcp__gmail__modify_email,"
-            "mcp__gmail__delete_email,mcp__gmail__download_attachment,"
-            "mcp__gmail__batch_modify_emails,mcp__gmail__batch_delete_emails,"
-            "mcp__gmail__create_label,mcp__gmail__update_label,"
-            "mcp__gmail__delete_label,mcp__gmail__get_or_create_label,"
-            "mcp__gmail__list_email_labels,mcp__gmail__create_filter,"
-            "mcp__gmail__list_filters,mcp__gmail__get_filter,"
-            "mcp__gmail__delete_filter"
-        ),
-        "--output-format", "stream-json",
-        "--verbose", "-",
-    ]
+    cmd = _build_claude_cmd(model, str(mcp_config_path), dry_run)
 
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
@@ -465,7 +481,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         def _clean_reason(s: str) -> str:
             return re.sub(r'[*`"]+$', '', s).strip()
 
-        for result_status in ["APPLIED", "EXPIRED", "CAPTCHA", "LOGIN_ISSUE"]:
+        for result_status in ["DRYRUN", "APPLIED", "EXPIRED", "CAPTCHA", "LOGIN_ISSUE"]:
             if f"RESULT:{result_status}" in output:
                 add_event(f"[W{worker_id}] {result_status} ({elapsed}s): {job['title'][:30]}")
                 update_state(worker_id, status=result_status.lower(),
@@ -569,6 +585,10 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
     jobs_done = 0
     empty_polls = 0
     port = BASE_CDP_PORT + worker_id
+    # Dry-run releases its lock without changing status, so a job returns to the
+    # head of the queue and would be re-selected forever. Track what we've
+    # already dry-run this session and stop when the queue only repeats.
+    seen_urls: set[str] = set()
 
     while not _stop_event.is_set():
         if not continuous and jobs_done >= limit:
@@ -579,6 +599,11 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
 
         job = acquire_job(target_url=target_url, min_score=min_score,
                           worker_id=worker_id)
+        if dry_run and job and job["url"] in seen_urls:
+            release_lock(job["url"])
+            add_event(f"[W{worker_id}] Dry-run queue exhausted")
+            update_state(worker_id, status="done", last_action="dry-run done")
+            break
         if not job:
             if not continuous:
                 add_event(f"[W{worker_id}] Queue empty")
@@ -595,6 +620,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
             continue
 
         empty_polls = 0
+        seen_urls.add(job["url"])
 
         chrome_proc = None
         try:
@@ -608,6 +634,17 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 release_lock(job["url"])
                 add_event(f"[W{worker_id}] Skipped: {job['title'][:30]}")
                 continue
+            elif result == "dryrun":
+                # No DB side effects; release the lock and fall through to the
+                # loop tail (jobs_done/target_url) -- do NOT `continue`.
+                release_lock(job["url"])
+                add_event(f"[W{worker_id}] DRY RUN OK: {job['title'][:30]}")
+            elif result == "applied" and dry_run:
+                # Agent ignored the dry-run instruction and claimed APPLIED.
+                # Do NOT mark applied -- release and warn.
+                release_lock(job["url"])
+                logger.warning("Worker %d: agent emitted APPLIED during dry-run; not marking", worker_id)
+                add_event(f"[W{worker_id}] Dry-run: ignored stray APPLIED")
             elif result == "applied":
                 mark_result(job["url"], "applied", duration_ms=duration_ms)
                 applied += 1
