@@ -93,10 +93,13 @@ def _store_jobs_filtered(
             filtered += 1
             continue
         try:
+            # Prefer a parsed company; fall back to the site name (direct career
+            # sites are themselves the employer).
+            company = job.get("company") or site
             conn.execute(
-                "INSERT INTO jobs (url, title, salary, description, location, site, strategy, discovered_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (url, job.get("title"), job.get("salary"), job.get("description"),
+                "INSERT INTO jobs (url, title, company, salary, description, location, site, strategy, discovered_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (url, job.get("title"), company, job.get("salary"), job.get("description"),
                  job.get("location"), site, strategy, now),
             )
             new += 1
