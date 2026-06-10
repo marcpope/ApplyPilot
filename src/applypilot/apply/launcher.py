@@ -274,6 +274,25 @@ def mark_job(url: str, status: str, reason: str | None = None) -> None:
     conn.commit()
 
 
+def reset_stale_locks() -> int:
+    """Clear jobs stuck in 'in_progress' from a previous crashed run.
+
+    All workers live in this process, so anything still 'in_progress' at startup
+    is by definition stale (the worker that held it is gone). Returns NULL so the
+    job is eligible again.
+
+    Returns:
+        Number of stale locks cleared.
+    """
+    conn = get_connection()
+    cursor = conn.execute(
+        "UPDATE jobs SET apply_status = NULL, agent_id = NULL "
+        "WHERE apply_status = 'in_progress'"
+    )
+    conn.commit()
+    return cursor.rowcount
+
+
 def reset_failed() -> int:
     """Reset all failed jobs so they can be retried.
 
@@ -722,6 +741,11 @@ def main(limit: int = 1, target_url: str | None = None,
 
     config.ensure_dirs()
     console = Console()
+
+    # Recover jobs stranded 'in_progress' by a previous crashed run.
+    recovered = reset_stale_locks()
+    if recovered:
+        console.print(f"[yellow]Recovered {recovered} stale in-progress job(s)[/yellow]")
 
     if continuous:
         effective_limit = 0
