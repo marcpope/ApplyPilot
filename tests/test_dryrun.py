@@ -65,3 +65,18 @@ def test_dryrun_disallows_send_email_tool():
     dry_disallowed = dry[dry.index("--disallowedTools") + 1]
     assert "mcp__gmail__send_email" not in real_disallowed
     assert "mcp__gmail__send_email" in dry_disallowed
+
+
+def test_dangerous_builtin_tools_disallowed():
+    """F2: host/network built-ins are denied even outside dry-run."""
+    cmd = _build_claude_cmd("claude-x", "/tmp/mcp.json", dry_run=False)
+    disallowed = cmd[cmd.index("--disallowedTools") + 1]
+    for tool in ("Bash", "Edit", "Write", "WebFetch", "WebSearch"):
+        assert tool in disallowed
+    # Browser + read must remain available (not in the deny list as standalone tokens).
+    assert "mcp__playwright__" not in disallowed
+
+
+def test_prompt_injection_guard_present(tmp_path, monkeypatch):
+    out = _build(tmp_path, monkeypatch, dry_run=False)
+    assert "suspected_prompt_injection" in out

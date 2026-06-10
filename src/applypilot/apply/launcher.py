@@ -314,7 +314,14 @@ def _build_claude_cmd(model: str, mcp_config_path: str, dry_run: bool = False) -
     only guard. In dry-run mode the Gmail send tool is also disallowed so the
     agent cannot send a real application email.
     """
-    disallowed = _GMAIL_DISALLOWED
+    # The agent browses untrusted employer pages with bypassPermissions, so a
+    # prompt injection could run shell or exfiltrate the profile/.env. Deny all
+    # built-in tools that touch the host or the network outside the browser.
+    # Read stays allowed (used to inspect the tailored resume).
+    disallowed = (
+        "Bash,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,KillShell,"
+        + _GMAIL_DISALLOWED
+    )
     if dry_run:
         disallowed += ",mcp__gmail__send_email"
     return [
