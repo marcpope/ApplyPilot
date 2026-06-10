@@ -40,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Jobs stranded `in_progress` by a crashed run are recovered at apply startup.
 - One failing site no longer aborts the whole smart-extract stage.
 
+### Changed
+- `applypilot doctor` checks for the Playwright browser; README and the init
+  wizard tell you to run `playwright install chromium`.
+- Re-running `applypilot init` merges into the existing `.env` (preserving keys
+  like `CAPSOLVER_API_KEY`) and prompts before overwriting `profile.json` /
+  `searches.yaml`. A plain-text resume is now required (or an explicit skip).
+
 ## [0.2.0] - 2026-02-17
 
 ### Added
