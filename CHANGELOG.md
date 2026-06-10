@@ -29,6 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scoring failures (rate limits, parse errors) leave jobs pending for retry
   instead of writing a permanent `fit_score=0`; scores commit incrementally so an
   interrupt doesn't discard the run; markdown-decorated scores parse correctly.
+- Tailored resumes and cover letters get collision-free filenames, and parallel
+  apply workers no longer share one upload path (was: one job's resume could be
+  sent to another employer).
+- The fabrication watchlist is word-boundary matched and respects the candidate's
+  real skills (no more false hits on "scalable"/"guardrails"; legitimate C++/C#
+  skills allowed).
+- Cover-letter PDFs render the actual letter body (were near-empty).
+- Sequential `run` no longer silently caps tailoring/cover letters at 20 jobs.
+- Jobs stranded `in_progress` by a crashed run are recovered at apply startup.
+- One failing site no longer aborts the whole smart-extract stage.
 
 ## [0.2.0] - 2026-02-17
 
