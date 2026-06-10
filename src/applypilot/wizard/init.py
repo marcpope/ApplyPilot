@@ -388,6 +388,22 @@ def run_wizard() -> None:
         else:
             tier_lines.append(f"  [dim]✗ Tier {t} — {label}  ({cmds})[/dim]")
 
+    # Warn if the Playwright browser isn't installed (pip doesn't bundle it).
+    import os as _os
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as _p:
+            _pw_exe = _p.chromium.executable_path
+        _pw_ok = bool(_pw_exe and _os.path.exists(_pw_exe))
+    except Exception:
+        _pw_ok = False
+    if not _pw_ok:
+        console.print(
+            "[yellow]Playwright browser not found.[/yellow] "
+            "Run [bold]playwright install chromium[/bold] "
+            "(needed for enrich, smart-extract, and PDF rendering).\n"
+        )
+
     unlock_hint = ""
     if tier == 1:
         unlock_hint = "\n[dim]To unlock Tier 2: configure an LLM API key (re-run [bold]applypilot init[/bold]).[/dim]"
