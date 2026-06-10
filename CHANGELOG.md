@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   significant answers are flagged for the human rather than guessed. The agent
   no longer claims experience with tools the candidate hasn't listed.
 - `apply --url` now matches fresh (unapplied) jobs and won't file duplicates.
+- Location filter no longer discards nearly every job — it reads the documented
+  `location.accept_patterns` schema and treats an empty accept list as "keep".
+- The real company name is stored and used in scoring, tailoring, cover letters,
+  the apply prompt, and the dashboard (was showing the job board, e.g. "linkedin").
+- Scoring failures (rate limits, parse errors) leave jobs pending for retry
+  instead of writing a permanent `fit_score=0`; scores commit incrementally so an
+  interrupt doesn't discard the run; markdown-decorated scores parse correctly.
 
 ## [0.2.0] - 2026-02-17
 
