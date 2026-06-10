@@ -26,6 +26,7 @@ from applypilot.config import (
     RESUME_PDF_PATH,
     SEARCH_CONFIG_PATH,
     ensure_dirs,
+    write_private_text,
 )
 
 console = Console()
@@ -186,7 +187,7 @@ def _setup_profile() -> dict:
     }
 
     # Save
-    PROFILE_PATH.write_text(json.dumps(profile, indent=2, ensure_ascii=False), encoding="utf-8")
+    write_private_text(PROFILE_PATH, json.dumps(profile, indent=2, ensure_ascii=False))
     console.print(f"\n[green]Profile saved to {PROFILE_PATH}[/green]")
     return profile
 
@@ -282,7 +283,7 @@ def _setup_ai_features() -> None:
         env_lines.append(f"LLM_MODEL={model}")
 
     env_lines.append("")
-    ENV_PATH.write_text("\n".join(env_lines), encoding="utf-8")
+    write_private_text(ENV_PATH, "\n".join(env_lines))
     console.print(f"[green]AI configuration saved to {ENV_PATH}[/green]")
 
 
@@ -320,12 +321,12 @@ def _setup_auto_apply() -> None:
         if ENV_PATH.exists():
             existing = ENV_PATH.read_text(encoding="utf-8")
             if "CAPSOLVER_API_KEY" not in existing:
-                ENV_PATH.write_text(
+                write_private_text(
+                    ENV_PATH,
                     existing.rstrip() + f"\nCAPSOLVER_API_KEY={capsolver_key}\n",
-                    encoding="utf-8",
                 )
         else:
-            ENV_PATH.write_text(f"# ApplyPilot configuration\nCAPSOLVER_API_KEY={capsolver_key}\n", encoding="utf-8")
+            write_private_text(ENV_PATH, f"# ApplyPilot configuration\nCAPSOLVER_API_KEY={capsolver_key}\n")
         console.print("[green]CapSolver key saved.[/green]")
     else:
         console.print("[dim]Skipped. Add CAPSOLVER_API_KEY to .env later if needed.[/dim]")

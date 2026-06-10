@@ -238,12 +238,13 @@ def gen_prompt(target_url: str, min_score: int = 7,
     config.ensure_dirs()
     site_slug = (job.get("site") or "unknown")[:20].replace(" ", "_")
     prompt_file = config.LOG_DIR / f"prompt_{site_slug}_{job['title'][:30].replace(' ', '_')}.txt"
-    prompt_file.write_text(prompt, encoding="utf-8")
+    # The generated prompt embeds the CapSolver key and the job-site password.
+    config.write_private_text(prompt_file, prompt)
 
     # Write MCP config for reference
     port = BASE_CDP_PORT + worker_id
     mcp_path = config.APP_DIR / f".mcp-apply-{worker_id}.json"
-    mcp_path.write_text(json.dumps(_make_mcp_config(port)), encoding="utf-8")
+    config.write_private_text(mcp_path, json.dumps(_make_mcp_config(port)))
 
     return prompt_file
 
@@ -362,7 +363,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
 
     # Write per-worker MCP config
     mcp_config_path = config.APP_DIR / f".mcp-apply-{worker_id}.json"
-    mcp_config_path.write_text(json.dumps(_make_mcp_config(port)), encoding="utf-8")
+    config.write_private_text(mcp_config_path, json.dumps(_make_mcp_config(port)))
 
     # Build claude command
     cmd = _build_claude_cmd(model, str(mcp_config_path), dry_run)
