@@ -202,16 +202,21 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
     resume_text = RESUME_PATH.read_text(encoding="utf-8")
     conn = get_connection()
 
-    # Fetch jobs that have tailored resumes but no cover letter yet
-    jobs = conn.execute(
+    # Fetch jobs that have tailored resumes but no cover letter yet.
+    # limit <= 0 means "all": a literal LIMIT 0 would return zero rows.
+    sql = (
         "SELECT * FROM jobs "
         "WHERE fit_score >= ? AND tailored_resume_path IS NOT NULL "
         "AND full_description IS NOT NULL "
         "AND (cover_letter_path IS NULL OR cover_letter_path = '') "
         "AND COALESCE(cover_attempts, 0) < ? "
-        "ORDER BY fit_score DESC LIMIT ?",
-        (min_score, MAX_ATTEMPTS, limit),
-    ).fetchall()
+        "ORDER BY fit_score DESC"
+    )
+    params: list = [min_score, MAX_ATTEMPTS]
+    if limit > 0:
+        sql += " LIMIT ?"
+        params.append(limit)
+    jobs = conn.execute(sql, params).fetchall()
 
     if not jobs:
         log.info("No jobs needing cover letters (score >= %d).", min_score)
