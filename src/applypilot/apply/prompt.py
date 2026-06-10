@@ -74,14 +74,23 @@ def _build_profile_summary(profile: dict) -> str:
     # Availability
     lines.append(f"Available: {avail.get('earliest_start_date', 'Immediately')}")
 
-    # Standard responses
-    lines.extend([
-        "Age 18+: Yes",
-        "Background Check: Yes",
-        "Felony: No",
-        "Previously Worked Here: No",
-        "How Heard: Online Job Board",
-    ])
+    # Screening responses -- driven by the profile, never hardcoded. Legally
+    # significant answers default to "NOT PROVIDED" so the agent asks the human
+    # rather than guessing on the user's behalf.
+    screening = profile.get("screening", {})
+    _yn = {True: "Yes", False: "No"}
+    not_provided = "NOT PROVIDED -- ask the human, do not guess"
+    for key, label in (
+        ("age_18_plus", "Age 18+"),
+        ("consents_to_background_check", "Background Check"),
+        ("felony_conviction", "Felony"),
+    ):
+        if key in screening:
+            lines.append(f"{label}: {_yn.get(screening[key], screening[key])}")
+        else:
+            lines.append(f"{label}: {not_provided}")
+    if screening.get("how_heard"):
+        lines.append(f"How Heard: {screening['how_heard']}")
 
     # EEO
     lines.append(f"Gender: {eeo.get('gender', 'Decline to self-identify')}")
@@ -177,8 +186,10 @@ Hard facts -> answer truthfully from the profile. No guessing. This includes:
   - Work authorization: {work_auth.get('legally_authorized_to_work', 'see profile')}
   - Citizenship, clearance, licenses, certifications: answer from profile only
   - Criminal/background: answer from profile only
+  - "Have you previously worked for this company?": answer from the EXPERIENCE section of the resume -- check the employer name against past employers listed there. If unclear -> RESULT:FAILED:needs_human_answer
+  - If any required answer is marked "NOT PROVIDED" in the APPLICANT PROFILE, do NOT guess. Output RESULT:FAILED:needs_human_answer:<question>
 
-Skills and tools -> be confident. This candidate is a {target_role} with {years} years experience. If the question asks "Do you have experience with [tool]?" and it's in the same domain (DevOps, backend, ML, cloud, automation), answer YES. Software engineers learn tools fast. Don't sell short.
+Skills and tools -> answer from the resume and profile skills only. The candidate is a {target_role} with {years} years experience. If a tool appears in the resume or skills_boundary, answer YES confidently. If it's adjacent but not listed, choose the honest middle option when available ("some familiarity"), otherwise answer NO. NEVER claim certifications, licenses, or specific year-counts that are not in the profile.
 
 Open-ended questions ("Why do you want this role?", "Tell us about yourself", "What interests you?") -> Write 2-3 sentences. Be specific to THIS job. Reference something from the job description. Connect it to a real achievement from the resume. No generic fluff. No "I am passionate about..." -- sound like a real person.
 

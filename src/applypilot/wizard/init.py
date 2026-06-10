@@ -169,6 +169,17 @@ def _setup_profile() -> dict:
         "disability_status": "Decline to self-identify",
     }
 
+    # -- Screening --
+    # These are submitted to real employers; some are legally significant, so
+    # collect them explicitly instead of hardcoding answers.
+    console.print("\n[bold]Screening questions[/bold] (used to auto-answer application forms)")
+    profile["screening"] = {
+        "age_18_plus": Confirm.ask("Are you 18 or older?", default=True),
+        "consents_to_background_check": Confirm.ask("Do you consent to a background check?", default=True),
+        "felony_conviction": Confirm.ask("Have you been convicted of a felony?", default=False),
+        "how_heard": Prompt.ask("How did you hear about jobs you apply to?", default="Online Job Board"),
+    }
+
     # -- Availability --
     profile["availability"] = {
         "earliest_start_date": Prompt.ask("Earliest start date", default="Immediately"),
