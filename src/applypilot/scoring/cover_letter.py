@@ -244,11 +244,13 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
             cl_path = COVER_LETTER_DIR / f"{prefix}_CL.txt"
             cl_path.write_text(letter, encoding="utf-8")
 
-            # Generate PDF (best-effort)
+            # Generate PDF (best-effort). Use the letter renderer, NOT the resume
+            # converter, which drops a cover letter's body.
             pdf_path = None
             try:
-                from applypilot.scoring.pdf import convert_to_pdf
-                pdf_path = str(convert_to_pdf(cl_path))
+                from applypilot.scoring.pdf import convert_letter_to_pdf
+                applicant_name = profile.get("personal", {}).get("full_name", "")
+                pdf_path = str(convert_letter_to_pdf(cl_path, applicant_name=applicant_name))
             except Exception:
                 log.debug("PDF generation failed for %s", cl_path, exc_info=True)
 
