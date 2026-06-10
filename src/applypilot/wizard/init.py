@@ -89,18 +89,28 @@ def _setup_resume() -> None:
             shutil.copy2(src, RESUME_PDF_PATH)
             console.print(f"[green]Copied to {RESUME_PDF_PATH}[/green]")
 
-            # Also ask for a plain-text version for LLM consumption
-            txt_path_str = Prompt.ask(
-                "Plain-text version of your resume (.txt)",
-                default="",
-            )
-            if txt_path_str.strip():
-                txt_src = Path(txt_path_str.strip().strip('"').strip("'")).expanduser().resolve()
+            # A plain-text resume is REQUIRED -- scoring, tailoring and cover
+            # letters read it and crash hours later without it. Loop until we
+            # get a valid file or the user explicitly types 'skip'.
+            while True:
+                txt_path_str = Prompt.ask(
+                    "Plain-text version of your resume (.txt path, or 'skip')"
+                ).strip()
+                if txt_path_str.lower() == "skip":
+                    console.print(
+                        f"[red]Scoring, tailoring, and cover letters will FAIL without "
+                        f"resume.txt. Add it later at {RESUME_PATH}.[/red]"
+                    )
+                    break
+                if not txt_path_str:
+                    console.print("[yellow]Enter a .txt path or type 'skip'.[/yellow]")
+                    continue
+                txt_src = Path(txt_path_str.strip('"').strip("'")).expanduser().resolve()
                 if txt_src.exists():
                     shutil.copy2(txt_src, RESUME_PATH)
                     console.print(f"[green]Copied to {RESUME_PATH}[/green]")
-                else:
-                    console.print("[yellow]File not found, skipping plain-text copy.[/yellow]")
+                    break
+                console.print(f"[red]File not found:[/red] {txt_src}")
         break
 
 
