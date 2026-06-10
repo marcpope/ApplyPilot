@@ -32,6 +32,35 @@ from applypilot.config import (
 console = Console()
 
 
+def _merge_env(existing_text: str, new_pairs: dict) -> str:
+    """Merge new KEY=VALUE pairs into an existing .env, preserving everything else.
+
+    Re-running init must not silently drop keys the user set elsewhere (a
+    CapSolver key, a manual CHROME_PATH). Unknown keys and comments are kept;
+    keys present in new_pairs are overwritten in place.
+    """
+    lines = existing_text.splitlines()
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            out.append(line)
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in new_pairs:
+            out.append(f"{key}={new_pairs[key]}")
+            seen.add(key)
+        else:
+            out.append(line)
+    if not out or out[0].strip() != "# ApplyPilot configuration":
+        out.insert(0, "# ApplyPilot configuration")
+    for key, value in new_pairs.items():
+        if key not in seen:
+            out.append(f"{key}={value}")
+    return "\n".join(out) + "\n"
+
+
 # ---------------------------------------------------------------------------
 # Resume
 # ---------------------------------------------------------------------------
@@ -82,6 +111,12 @@ def _setup_resume() -> None:
 def _setup_profile() -> dict:
     """Walk through profile questions and return a nested profile dict."""
     console.print(Panel("[bold]Step 2: Profile[/bold]\nTell ApplyPilot about yourself. This powers scoring, tailoring, and auto-fill."))
+
+    if PROFILE_PATH.exists() and not Confirm.ask(
+        f"profile.json already exists at {PROFILE_PATH} — overwrite?", default=False
+    ):
+        console.print("[dim]Keeping existing profile.json[/dim]")
+        return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
 
     profile: dict = {}
 
@@ -200,6 +235,12 @@ def _setup_searches() -> None:
     """Generate a searches.yaml from user input."""
     console.print(Panel("[bold]Step 3: Job Search Config[/bold]\nDefine what you're looking for."))
 
+    if SEARCH_CONFIG_PATH.exists() and not Confirm.ask(
+        f"searches.yaml already exists at {SEARCH_CONFIG_PATH} — overwrite?", default=False
+    ):
+        console.print("[dim]Keeping existing searches.yaml[/dim]")
+        return
+
     location = Prompt.ask("Target location (e.g. 'Remote', 'Canada', 'New York, NY')", default="Remote")
     distance_str = Prompt.ask("Search radius in miles (0 for remote-only)", default="0")
     try:
@@ -264,26 +305,24 @@ def _setup_ai_features() -> None:
         default="gemini",
     )
 
-    env_lines = ["# ApplyPilot configuration", ""]
+    new_pairs: dict[str, str] = {}
 
     if provider == "gemini":
         api_key = Prompt.ask("Gemini API key (from aistudio.google.com)")
-        model = Prompt.ask("Model", default="gemini-2.0-flash")
-        env_lines.append(f"GEMINI_API_KEY={api_key}")
-        env_lines.append(f"LLM_MODEL={model}")
+        new_pairs["GEMINI_API_KEY"] = api_key
+        new_pairs["LLM_MODEL"] = Prompt.ask("Model", default="gemini-2.0-flash")
     elif provider == "openai":
         api_key = Prompt.ask("OpenAI API key")
-        model = Prompt.ask("Model", default="gpt-4o-mini")
-        env_lines.append(f"OPENAI_API_KEY={api_key}")
-        env_lines.append(f"LLM_MODEL={model}")
+        new_pairs["OPENAI_API_KEY"] = api_key
+        new_pairs["LLM_MODEL"] = Prompt.ask("Model", default="gpt-4o-mini")
     elif provider == "local":
-        url = Prompt.ask("Local LLM endpoint URL", default="http://localhost:8080/v1")
-        model = Prompt.ask("Model name", default="local-model")
-        env_lines.append(f"LLM_URL={url}")
-        env_lines.append(f"LLM_MODEL={model}")
+        new_pairs["LLM_URL"] = Prompt.ask("Local LLM endpoint URL", default="http://localhost:8080/v1")
+        new_pairs["LLM_MODEL"] = Prompt.ask("Model name", default="local-model")
 
-    env_lines.append("")
-    write_private_text(ENV_PATH, "\n".join(env_lines))
+    # Merge into any existing .env so previously saved keys (e.g. a CapSolver
+    # key, or a manually added CHROME_PATH) survive a re-run of init.
+    existing = ENV_PATH.read_text(encoding="utf-8") if ENV_PATH.exists() else ""
+    write_private_text(ENV_PATH, _merge_env(existing, new_pairs))
     console.print(f"[green]AI configuration saved to {ENV_PATH}[/green]")
 
 
