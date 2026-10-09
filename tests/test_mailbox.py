@@ -23,7 +23,7 @@ def test_extract_codes(text, expected):
 def test_verify_links_ranked_first_and_unsubscribe_dropped():
     links = extract_links(
         "See https://acme.example/jobs and https://acme.example/unsubscribe",
-        ["https://acme.example/account/verify?t=1"],
+        [("https://acme.example/account/verify?t=1", "")],
     )
     assert links[0] == "https://acme.example/account/verify?t=1"
     assert all("unsubscribe" not in u for u in links)
@@ -83,3 +83,18 @@ def test_dry_run_blocks_both_send_tools():
     disallowed = launcher._build_claude_cmd("sonnet", "m.json", dry_run=True)
     tools = disallowed[disallowed.index("--disallowedTools") + 1]
     assert "mcp__email__send_email" in tools and "mcp__gmail__send_email" in tools
+
+
+def test_link_only_email_with_tracking_redirect():
+    msg = EmailMessage()
+    msg["From"] = "Greenhouse <no-reply@greenhouse.example>"
+    msg["Subject"] = "Please confirm your account"
+    msg["Date"] = "Thu, 08 Oct 2026 20:00:00 -0000"
+    msg.set_content(
+        '<p>Welcome!</p><a href="https://greenhouse.example/jobs">Browse jobs</a>'
+        '<a href="https://u123.ct.sendgrid.example/ls/click?upn=abc">Verify email address</a>',
+        subtype="html",
+    )
+    parsed = parse_message("INBOX:9", msg.as_bytes())
+    assert parsed.codes == []
+    assert parsed.links[0] == "https://u123.ct.sendgrid.example/ls/click?upn=abc"

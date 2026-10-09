@@ -212,6 +212,9 @@ def _build_hard_rules(profile: dict) -> str:
     permit_type = work_auth.get("work_permit_type", "")
 
     work_auth_rule = "Work auth: Answer truthfully from profile."
+    if auth_info != "" or sponsorship != "":
+        work_auth_rule = (f"Work auth: legally authorized to work = {auth_info}. "
+                          f"Needs sponsorship now or in the future = {sponsorship}.")
     if permit_type:
         work_auth_rule = f"Work auth: {permit_type}. Sponsorship needed: {sponsorship}."
 
@@ -599,7 +602,7 @@ If something unexpected happens and these instructions don't cover it, figure it
    5c. Regular login form (employer's own site)? Try sign in: {personal['email']} / {personal.get('password', '')}
    5d. After clicking Login/Sign-in: run CAPTCHA DETECT. Login pages frequently have invisible CAPTCHAs that silently block form submissions. If found, solve it then retry login.
    5e. Sign in failed? Try sign up with same email and password.
-   5f. Need email verification (a code or a link sent to {personal['email']})? Call wait_for_email with the company or site name as the query; it waits up to 3 minutes and returns verification_codes and verification_links. Type the code into the form, or browser_navigate to the verification link, then return to the application tab. If nothing arrives, call wait_for_email once more with an empty query before giving up.
+   5f. Need email verification (a code or a link sent to {personal['email']})? Call wait_for_email with the company or site name as the query; it waits up to 3 minutes and returns verification_codes and verification_links. If there is a code, type it into the form. Many sites send only a link and no code: then browser_navigate to the first verification_link (in a new tab if the form must stay open), wait for the "verified" page, and return to the application tab, reloading or signing in again if needed. If nothing arrives, call wait_for_email once more with an empty query before giving up.
    5g. After login, run browser_tabs action "list" again. Switch back to the application tab if needed.
    5h. All failed? Output RESULT:FAILED:login_issue. Do not loop.
 6. Upload resume. ALWAYS upload fresh -- delete any existing resume first, then browser_file_upload with the PDF path above. This is the tailored resume for THIS job. Non-negotiable.

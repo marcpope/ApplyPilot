@@ -100,8 +100,8 @@ def _decode(value: str | None) -> str:
         return value
 
 
-def _body_text(msg: email.message.Message) -> tuple[str, list[str]]:
-    """Return (plain text, hrefs) for a message, preferring text/plain."""
+def _body_text(msg: email.message.Message) -> tuple[str, list[tuple[str, str]]]:
+    """Return (plain text, [(href, anchor text)]) for a message, preferring text/plain."""
     plain, html = "", ""
     for part in msg.walk() if msg.is_multipart() else [msg]:
         ctype = part.get_content_type()
@@ -115,10 +115,10 @@ def _body_text(msg: email.message.Message) -> tuple[str, list[str]]:
             plain = text
         elif ctype == "text/html" and not html:
             html = text
-    hrefs: list[str] = []
+    hrefs: list[tuple[str, str]] = []
     if html:
         soup = BeautifulSoup(html, "html.parser")
-        hrefs = [a["href"] for a in soup.find_all("a", href=True)]
+        hrefs = [(a["href"], a.get_text(" ", strip=True)) for a in soup.find_all("a", href=True)]
         if not plain:
             plain = soup.get_text("\n")
     plain = re.sub(r"\n\s*\n+", "\n\n", plain).strip()
@@ -136,11 +136,22 @@ def extract_codes(text: str) -> list[str]:
     return codes
 
 
-def extract_links(text: str, hrefs: list[str]) -> list[str]:
-    """Verification-looking links first, then any other http(s) links (max 10)."""
-    urls = list(dict.fromkeys(hrefs + re.findall(r"https?://[^\s<>\"')\]]+", text)))
-    urls = [u for u in urls if u.startswith("http") and "unsubscribe" not in u.lower()]
-    verify = [u for u in urls if any(w in u.lower() for w in _VERIFY_WORDS)]
+def extract_links(text: str, hrefs: list[tuple[str, str]]) -> list[str]:
+    """Verification links first, then any other http(s) links (max 10).
+
+    A link counts as a verification link when its URL or its button text
+    says so: senders often wrap the real URL in a click-tracking redirect
+    (click.sendgrid.net/...) whose only clue is the "Verify email" label.
+    """
+    anchors = {href: label for href, label in hrefs}
+    found = [h for h, _ in hrefs] + re.findall(r"https?://[^\s<>\"')\]]+", text)
+    urls = [u for u in dict.fromkeys(found) if u.startswith("http")]
+    urls = [u for u in urls if "unsubscribe" not in (u + anchors.get(u, "")).lower()]
+
+    def is_verify(url: str) -> bool:
+        return any(w in f"{url} {anchors.get(url, '')}".lower() for w in _VERIFY_WORDS)
+
+    verify = [u for u in urls if is_verify(u)]
     rest = [u for u in urls if u not in verify]
     return (verify + rest)[:10]
 
