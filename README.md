@@ -28,7 +28,7 @@ Three commands. That's it.
 
 ```bash
 pip install applypilot
-pip install --no-deps python-jobspy && pip install pydantic tls-client requests markdownify regex
+pip install --no-deps python-jobspy && pip install pydantic tls-client requests markdownify regex curl_cffi
 playwright install chromium   # the headless browser used by enrich, smart-extract, and PDF rendering
 applypilot init          # one-time setup: resume, profile, preferences, API keys
 applypilot doctor        # verify your setup — shows what's installed and what's missing
@@ -92,11 +92,20 @@ Each stage is independent. Run them all or pick what you need.
 | Python 3.11+ | Everything | Core runtime |
 | Playwright Chromium | Enrich, smart-extract, PDF | `playwright install chromium` after pip install (not bundled) |
 | Node.js 18+ | Auto-apply | Needed for `npx` to run Playwright MCP server |
-| Gemini API key | Scoring, tailoring, cover letters | Free tier (15 RPM / 1M tokens/day) is enough |
+| LLM API key | Scoring, tailoring, cover letters | Gemini, OpenAI, or any OpenAI-compatible API (see below) |
 | Chrome/Chromium | Auto-apply | Auto-detected on most systems |
 | Claude Code CLI | Auto-apply | Install from [claude.ai/code](https://claude.ai/code) |
 
-**Gemini API key is free.** Get one at [aistudio.google.com](https://aistudio.google.com). OpenAI and local models (Ollama/llama.cpp) are also supported.
+**Choosing an LLM.** `applypilot init` writes one of these to `~/.applypilot/.env`:
+
+| Provider | `.env` | Notes |
+|----------|--------|-------|
+| Gemini | `GEMINI_API_KEY=...` `LLM_MODEL=gemini-2.5-flash` | Key from [aistudio.google.com](https://aistudio.google.com). The free tier's daily request limit is too low for a full run of a few hundred jobs. `gemini-2.0-flash` returns 404 for new keys. |
+| OpenAI | `OPENAI_API_KEY=...` `LLM_MODEL=gpt-4o-mini` | |
+| DeepSeek, OpenRouter, Groq, etc. | `LLM_URL=https://api.deepseek.com/v1` `LLM_API_KEY=...` `LLM_MODEL=deepseek-chat` | Any OpenAI-compatible endpoint. Include the `/v1` path. |
+| Ollama / llama.cpp | `LLM_URL=http://localhost:11434/v1` `LLM_MODEL=qwen3:8b` | `LLM_MODEL` is the model tag (`ollama list`), not the word "ollama". Very small reasoning models (under ~7B) often fail to produce a usable score. |
+
+If `LLM_URL` is set it wins over the API keys. `applypilot doctor` sends one test request, so a wrong model name, bad key or empty quota shows up there instead of as hundreds of failed jobs.
 
 ### Optional
 
@@ -119,19 +128,25 @@ Your personal data in one structured file: contact info, work authorization, com
 Job search queries, target titles, locations, boards. Run multiple searches with different parameters.
 
 ### `.env`
-API keys and runtime config: `GEMINI_API_KEY`, `LLM_MODEL`, `CAPSOLVER_API_KEY` (optional).
+API keys and runtime config: `GEMINI_API_KEY` / `OPENAI_API_KEY` / `LLM_URL` + `LLM_API_KEY`, `LLM_MODEL`, `CAPSOLVER_API_KEY` (optional), `APPLYPILOT_JOB_TIMEOUT` (seconds per auto-apply job, default 900).
 
 ### Package configs (shipped with ApplyPilot)
-- `config/employers.yaml` - Workday employer registry (48 preconfigured)
+- `config/employers.yaml` - Workday employer registry (48 preconfigured, mostly Canadian employers)
 - `config/sites.yaml` - Direct career sites (30+), blocked sites, base URLs, manual ATS domains
-- `config/searches.example.yaml` - Example search configuration
+- `config/searches.example.yaml` - Example search configuration, with every supported key documented
+
+To customize `employers.yaml` or `sites.yaml`, copy it into `~/.applypilot/` and edit the copy. A file there replaces the packaged one and survives upgrades:
+
+```bash
+python -c "import applypilot.config as c, shutil; shutil.copy(c.CONFIG_DIR / 'employers.yaml', c.APP_DIR)"
+```
 
 ---
 
 ## How Stages Work
 
 ### Discover
-Queries Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google Jobs via JobSpy. Scrapes 48 Workday employer portals (configurable in `employers.yaml`). Hits 30 direct career sites with custom extractors. Deduplicates by URL.
+Queries the boards listed under `boards:` in `searches.yaml` via JobSpy (Indeed and LinkedIn by default; Glassdoor, Google Jobs and others are opt-in, and ZipRecruiter currently blocks JobSpy with HTTP 403). Scrapes 48 Workday employer portals (configurable in `employers.yaml`). Hits 30 direct career sites with custom extractors. Deduplicates by URL.
 
 ### Enrich
 Visits each job URL and extracts the full description. 3-tier cascade: JSON-LD structured data, then CSS selector patterns, then AI-powered extraction for unknown layouts.

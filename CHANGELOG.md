@@ -39,6 +39,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sequential `run` no longer silently caps tailoring/cover letters at 20 jobs.
 - Jobs stranded `in_progress` by a crashed run are recovered at apply startup.
 - One failing site no longer aborts the whole smart-extract stage.
+- Jobs left at `fit_score=0` by earlier failed runs are re-queued for scoring.
+  Scoring, tailoring and cover letters stop after 5 consecutive LLM failures
+  instead of grinding through the queue, and LLM errors no longer use up a
+  job's tailor/cover attempts. Tailor and cover results commit per job.
+- Empty or reasoning-only LLM responses raise a clear error instead of being
+  parsed as results; `<think>` blocks are stripped; HTTP errors include the
+  provider's message (e.g. "model no longer available to new users").
+- Token limits raised for reasoning models (tailor 2048 -> 16384; score, judge
+  and cover letters -> 4096), which caused `EXHAUSTED_RETRIES`.
+- Tailored resumes print skills as text instead of Python lists, accept a
+  resume with no projects, and don't flag skills that are on the base resume
+  as fabricated. The prompt no longer forces one page at the cost of dropping
+  preserved companies.
+- Discovery reads `boards:` (and `sites:`), passes `defaults.distance` to
+  JobSpy, applies `exclude_titles`, and stores missing fields as NULL instead
+  of the string "None".
+- `status`, `apply`'s pre-check and the apply queue use one definition of
+  "ready to apply", so their counts agree.
+- Ctrl+C "skip current job" no longer kills ApplyPilot: the agent ran in
+  ApplyPilot's process group, which `killpg` took down with it.
+- A per-job timeout (`APPLYPILOT_JOB_TIMEOUT`, default 900s) stops hung apply
+  agents. The Claude CLI is found via `PATH` lookup, so `claude.cmd` works on
+  Windows.
+- Dry runs no longer sign in, create accounts or upload files.
+- Smart extract and enrichment no longer abort a site when the page never
+  reaches network idle.
 
 ### Changed
 - `applypilot doctor` checks for the Playwright browser; README and the init
@@ -46,6 +72,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Re-running `applypilot init` merges into the existing `.env` (preserving keys
   like `CAPSOLVER_API_KEY`) and prompts before overwriting `profile.json` /
   `searches.yaml`. A plain-text resume is now required (or an explicit skip).
+- Default Gemini model is `gemini-2.5-flash`. A bare Ollama URL gets `/v1`
+  appended.
+- ZipRecruiter is no longer searched by default (it answers JobSpy with HTTP
+  403); add it to `boards:` to opt in.
+- `employers.yaml` and `sites.yaml` in `~/.applypilot/` override the packaged
+  copies.
+- `applypilot doctor` sends a test request to the configured LLM and warns
+  when `profile.json` has no screening answers.
+- `applypilot init` supports any OpenAI-compatible API with an API key and
+  clears the previous provider's keys when you switch.
 
 ## [0.2.0] - 2026-02-17
 
