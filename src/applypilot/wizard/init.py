@@ -33,7 +33,8 @@ from applypilot.llm import DEFAULT_GEMINI_MODEL
 console = Console()
 
 # Keys that select an LLM provider; switching providers clears the others.
-_PROVIDER_KEYS = frozenset({"GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL", "LLM_API_KEY", "LLM_MODEL"})
+_PROVIDER_KEYS = frozenset({"GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL", "LLM_API_KEY", "LLM_MODEL",
+                            "LLM_PROVIDER"})
 
 
 def _merge_env(existing_text: str, new_pairs: dict, remove: set[str] | frozenset[str] = frozenset()) -> str:
@@ -333,17 +334,28 @@ def _setup_ai_features() -> None:
         "  [bold]gemini[/bold]  Google AI Studio key (free tier has low daily limits)\n"
         "  [bold]openai[/bold]  OpenAI API key\n"
         "  [bold]compatible[/bold]  any OpenAI-compatible API: DeepSeek, OpenRouter, Groq, "
-        "or a local Ollama / llama.cpp server"
+        "or a local Ollama / llama.cpp server\n"
+        "  [bold]claude-cli / codex-cli / gemini-cli[/bold]  use your Claude, ChatGPT or Google AI "
+        "subscription through its logged-in CLI (no API credits)"
     )
     provider = Prompt.ask(
         "Provider",
-        choices=["gemini", "openai", "compatible", "local"],
+        choices=["gemini", "openai", "compatible", "local", "claude-cli", "codex-cli", "gemini-cli"],
         default="gemini",
     )
 
     new_pairs: dict[str, str] = {}
 
-    if provider == "gemini":
+    if provider.endswith("-cli"):
+        binary = provider.removesuffix("-cli")
+        if not shutil.which(binary):
+            console.print(f"[yellow]`{binary}` is not on PATH yet. Install it and log in before running.[/yellow]")
+        new_pairs["LLM_PROVIDER"] = provider
+        console.print(
+            "[dim]Per-stage overrides go in .env, e.g. LLM_PROVIDER_SCORE=gemini-cli, "
+            "LLM_PROVIDER_TAILOR=codex-cli.[/dim]"
+        )
+    elif provider == "gemini":
         api_key = Prompt.ask("Gemini API key (from aistudio.google.com)")
         new_pairs["GEMINI_API_KEY"] = api_key
         new_pairs["LLM_MODEL"] = Prompt.ask("Model", default=DEFAULT_GEMINI_MODEL)

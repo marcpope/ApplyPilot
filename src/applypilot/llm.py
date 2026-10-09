@@ -10,9 +10,13 @@ Auto-detects provider from environment:
 LLM_MODEL env var overrides the model name for any provider.
 """
 
+import json
 import logging
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 from urllib.parse import urlparse
@@ -415,17 +419,208 @@ class _GeminiCompatForbidden(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Singleton
+# Subscription CLIs (Claude Max, ChatGPT, Google AI plans)
 # ---------------------------------------------------------------------------
 
-_instance: LLMClient | None = None
+CLI_PROVIDERS = ("claude-cli", "codex-cli", "gemini-cli")
+
+_CLI_TIMEOUT = 300  # seconds per call
+_CLI_RETRIES = 3
+
+# CLI output meaning the plan's usage window is used up. Retrying within the
+# run can't help, so fail fast and let the stage's error limit stop it.
+_CLI_LIMIT_MARKERS = (
+    "usage limit", "rate limit reached", "you've hit your limit", "quota exceeded",
+    "resource_exhausted", "limit will reset", "exceeded your current quota",
+)
 
 
-def get_client() -> LLMClient:
-    """Return (or create) the module-level LLMClient singleton."""
-    global _instance
-    if _instance is None:
-        base_url, model, api_key = _detect_provider()
-        log.info("LLM provider: %s  model: %s", base_url, model)
-        _instance = LLMClient(base_url, model, api_key)
-    return _instance
+def subscription_env(provider: str) -> dict[str, str]:
+    """Environment for a subscription CLI, minus API keys that would override the login.
+
+    Each CLI prefers an API key from the environment over the account login,
+    which would bill API credits instead of the user's plan. ApplyPilot's own
+    .env may hold such keys for the HTTP providers.
+    """
+    env = os.environ.copy()
+    for key in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
+        env.pop(key, None)
+    drop = {
+        "claude-cli": ("ANTHROPIC_API_KEY",),
+        "codex-cli": ("OPENAI_API_KEY", "CODEX_API_KEY"),
+        "gemini-cli": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    }[provider]
+    keep_key = os.environ.get("APPLYPILOT_CLAUDE_USE_API_KEY", "").lower() in ("1", "true", "yes")
+    for key in drop:
+        if not (key == "ANTHROPIC_API_KEY" and keep_key):
+            env.pop(key, None)
+    return env
+
+
+class CLIClient:
+    """LLM client that runs a prompt through a logged-in CLI.
+
+    Uses the account's subscription (Claude Max, ChatGPT Plus/Pro, Google AI
+    Pro) instead of API credits. Each call starts a CLI process, so it's
+    slower than HTTP, but nothing is billed per token.
+    """
+
+    def __init__(self, provider: str, model: str | None = None, reasoning: str | None = None) -> None:
+        if provider not in CLI_PROVIDERS:
+            raise ValueError(f"Unknown CLI provider {provider!r}")
+        binary = {"claude-cli": "claude", "codex-cli": "codex", "gemini-cli": "gemini"}[provider]
+        self.provider = provider
+        self.binary = shutil.which(binary)
+        if not self.binary:
+            raise RuntimeError(f"LLM_PROVIDER={provider} but the `{binary}` CLI is not on PATH.")
+        self.model = model or ""
+        self.reasoning = reasoning
+        # Empty working dir: no project files, CLAUDE.md or AGENTS.md get pulled in.
+        self._workdir = tempfile.mkdtemp(prefix="applypilot-llm-")
+
+    def _command(self, system: str, out_file: str) -> list[str]:
+        if self.provider == "claude-cli":
+            cmd = [self.binary, "-p", "--output-format", "json", "--tools", "",
+                   "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands",
+                   # Skip user/project settings: the user's own CLAUDE.md, hooks and
+                   # skills added ~33K tokens to every call.
+                   "--setting-sources", ""]
+            if system:
+                cmd += ["--system-prompt", system]
+            if self.model:
+                cmd += ["--model", self.model]
+            return cmd
+        if self.provider == "codex-cli":
+            cmd = [self.binary, "exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only",
+                   "--ignore-rules", "--color", "never", "-o", out_file]
+            if self.model:
+                cmd += ["-m", self.model]
+            if self.reasoning:
+                cmd += ["-c", f'model_reasoning_effort="{self.reasoning}"']
+            return cmd + ["-"]
+        cmd = [self.binary, "-p", "", "-o", "json", "--approval-mode", "plan"]
+        if self.model:
+            cmd += ["-m", self.model]
+        return cmd
+
+    def _run_once(self, system: str, user: str) -> str:
+        out_file = os.path.join(self._workdir, "last_message.txt")
+        if os.path.exists(out_file):
+            os.remove(out_file)
+        # Claude takes the system prompt as a flag; the others get it inline.
+        stdin = user if self.provider == "claude-cli" or not system else (
+            f"{system}\n\n---\n\n{user}"
+        )
+        proc = subprocess.run(
+            self._command(system, out_file), input=stdin, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=_CLI_TIMEOUT, cwd=self._workdir,
+            env=subscription_env(self.provider),
+        )
+        combined = f"{proc.stdout}\n{proc.stderr}"
+        if any(marker in combined.lower() for marker in _CLI_LIMIT_MARKERS):
+            raise RuntimeError(f"{self.provider}: plan usage limit reached: {_tail(combined)}")
+        if proc.returncode != 0:
+            raise _CLIError(f"{self.provider} exited {proc.returncode}: {_tail(combined)}")
+
+        if self.provider == "codex-cli":
+            text = open(out_file, encoding="utf-8").read() if os.path.exists(out_file) else ""
+            return _finish_text(text, "codex")
+        try:
+            data = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            return _finish_text(proc.stdout, self.provider)
+        if self.provider == "claude-cli":
+            if data.get("is_error"):
+                raise _CLIError(f"claude-cli: {str(data.get('result'))[:300]}")
+            return _finish_text(data.get("result"), data.get("stop_reason"))
+        if data.get("error"):
+            raise _CLIError(f"gemini-cli: {str(data['error'])[:300]}")
+        return _finish_text(data.get("response"), "gemini")
+
+    def chat(self, messages: list[dict], temperature: float = 0.0,
+             max_tokens: int = 4096, json_mode: bool = False) -> str:
+        """Run the conversation through the CLI. temperature/max_tokens are
+        not exposed by the CLIs and are ignored."""
+        system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
+        user = "\n\n".join(m["content"] for m in messages if m["role"] != "system")
+        if json_mode:
+            user += "\n\nRespond with a single JSON object and nothing else."
+        for attempt in range(_CLI_RETRIES):
+            try:
+                return self._run_once(system, user)
+            except (_CLIError, subprocess.TimeoutExpired) as exc:
+                if attempt == _CLI_RETRIES - 1:
+                    raise RuntimeError(str(exc)) from exc
+                wait = 5 * (attempt + 1)
+                log.warning("%s call failed (%s); retrying in %ds", self.provider, str(exc)[:120], wait)
+                time.sleep(wait)
+        raise RuntimeError(f"{self.provider} failed after retries")
+
+    def ask(self, prompt: str, **kwargs) -> str:
+        return self.chat([{"role": "user", "content": prompt}], **kwargs)
+
+    def check(self) -> str:
+        return self._run_once("", "Reply with the single word OK.")
+
+    def close(self) -> None:
+        shutil.rmtree(self._workdir, ignore_errors=True)
+
+
+class _CLIError(Exception):
+    """A CLI call failed in a way worth retrying."""
+
+
+def _tail(text: str, limit: int = 240) -> str:
+    return " ".join(text.strip().split())[-limit:]
+
+
+# ---------------------------------------------------------------------------
+# Client selection
+# ---------------------------------------------------------------------------
+
+# Pipeline stages that call the LLM. LLM_PROVIDER_<STAGE> / LLM_MODEL_<STAGE>
+# override LLM_PROVIDER / LLM_MODEL for one stage.
+STAGES = ("score", "tailor", "cover", "extract")
+
+# Reasoning effort for codex-cli when the user hasn't set one: scoring runs
+# hundreds of times and doesn't need deep reasoning.
+_CODEX_EFFORT = {"score": "low", "extract": "low", "tailor": "medium", "cover": "medium"}
+
+_clients: dict[tuple, "LLMClient | CLIClient"] = {}
+_clients_lock = threading.Lock()
+
+
+def resolve_provider(stage: str | None = None) -> tuple[str, str]:
+    """Return (provider, model) for a stage. provider is a CLI name or "api"."""
+    suffix = f"_{stage.upper()}" if stage else ""
+    provider = (os.environ.get(f"LLM_PROVIDER{suffix}") or os.environ.get("LLM_PROVIDER") or "api").strip().lower()
+    model = os.environ.get(f"LLM_MODEL{suffix}") or ""
+    if provider not in CLI_PROVIDERS and provider != "api":
+        raise RuntimeError(f"Unknown LLM_PROVIDER {provider!r}; use api, {', '.join(CLI_PROVIDERS)}")
+    if not model and (provider == "api" or os.environ.get("LLM_PROVIDER") == provider):
+        # The global LLM_MODEL belongs to the global provider only.
+        model = os.environ.get("LLM_MODEL", "")
+    return provider, model
+
+
+def get_client(stage: str | None = None) -> "LLMClient | CLIClient":
+    """Return the shared client for a pipeline stage.
+
+    stage is one of STAGES, or None for the default provider.
+    """
+    provider, model = resolve_provider(stage)
+    key = (provider, model, _CODEX_EFFORT.get(stage or "") if provider == "codex-cli" else None)
+    with _clients_lock:
+        client = _clients.get(key)
+        if client is None:
+            if provider == "api":
+                base_url, api_model, api_key = _detect_provider()
+                client = LLMClient(base_url, model or api_model, api_key)
+                log.info("LLM provider: %s  model: %s", base_url, client.model)
+            else:
+                reasoning = os.environ.get("CODEX_REASONING_EFFORT") or key[2]
+                client = CLIClient(provider, model or None, reasoning)
+                log.info("LLM provider: %s  model: %s%s", provider, model or "(CLI default)",
+                         f"  reasoning: {reasoning}" if provider == "codex-cli" else "")
+            _clients[key] = client
+        return client

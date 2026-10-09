@@ -236,7 +236,10 @@ def get_tier() -> int:
     """
     load_env()
 
-    has_llm = any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL"))
+    has_llm = any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL")) or any(
+        os.environ.get(k, "").lower().endswith("-cli")
+        for k in ("LLM_PROVIDER", "LLM_PROVIDER_SCORE", "LLM_PROVIDER_TAILOR", "LLM_PROVIDER_COVER")
+    )
     if not has_llm:
         return 1
 

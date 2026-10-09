@@ -96,7 +96,7 @@ def score_job(resume_text: str, job: dict) -> dict:
     ]
 
     try:
-        client = get_client()
+        client = get_client("score")
         response = client.chat(messages, max_tokens=4096, temperature=0.2)
         return _parse_score_response(response)
     except Exception as e:

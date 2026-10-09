@@ -368,6 +368,10 @@ def _build_claude_cmd(model: str, mcp_config_path: str, dry_run: bool = False) -
         # MCP Toolkit browser tools, which shadow Playwright and can't reach
         # the resume files on the host).
         "--strict-mcp-config",
+        # Don't load the user's own Claude settings, CLAUDE.md, hooks or skills:
+        # they cost tens of thousands of tokens per application and can change
+        # the agent's behavior.
+        "--setting-sources", "",
         "--permission-mode", "bypassPermissions",
         "--no-session-persistence",
         "--disallowedTools", disallowed,
@@ -382,12 +386,8 @@ def _agent_env() -> dict[str, str]:
     key exported for some other project would silently bill every application
     to that API account. Pass it through only when the user opts in.
     """
-    env = os.environ.copy()
-    env.pop("CLAUDECODE", None)
-    env.pop("CLAUDE_CODE_ENTRYPOINT", None)
-    if os.environ.get("APPLYPILOT_CLAUDE_USE_API_KEY", "").lower() not in ("1", "true", "yes"):
-        env.pop("ANTHROPIC_API_KEY", None)
-    return env
+    from applypilot.llm import subscription_env
+    return subscription_env("claude-cli")
 
 
 # Output from the claude CLI that means it can't run at all (not logged in,

@@ -407,28 +407,40 @@ def doctor(
 
     # --- Tier 2 checks ---
     import os
-    from applypilot.llm import LLMClient, _detect_provider
-    try:
-        base_url, model, api_key = _detect_provider()
-    except RuntimeError:
-        results.append(("LLM provider", fail_mark,
-                        "Set GEMINI_API_KEY, OPENAI_API_KEY or LLM_URL in ~/.applypilot/.env "
-                        "(run 'applypilot init')"))
-    else:
-        results.append(("LLM provider", ok_mark, f"{base_url}  model: {model}"))
+    from applypilot.llm import STAGES, get_client, resolve_provider
+    stage_providers: dict[tuple[str, str], list[str]] = {}
+    llm_error = None
+    for stage in STAGES:
+        try:
+            stage_providers.setdefault(resolve_provider(stage), []).append(stage)
+        except RuntimeError as e:
+            llm_error = str(e)
+    if llm_error:
+        results.append(("LLM provider", fail_mark, llm_error))
+    for (provider, model), stages in stage_providers.items():
+        label = f"LLM ({', '.join(stages)})"
+        try:
+            client = get_client(stages[0])
+        except RuntimeError as e:
+            results.append((label, fail_mark,
+                            f"{e} Set GEMINI_API_KEY, OPENAI_API_KEY, LLM_URL or LLM_PROVIDER in "
+                            "~/.applypilot/.env (run 'applypilot init')"))
+            continue
+        where = getattr(client, "base_url", provider)
+        desc = f"{where}  model: {getattr(client, 'model', '') or '(CLI default)'}"
         if skip_llm_test:
-            results.append(("LLM test request", "[dim]skipped[/dim]", ""))
-        else:
-            client = LLMClient(base_url, model, api_key)
-            try:
-                client.check()
-                results.append(("LLM test request", ok_mark, "model answered"))
-            except Exception as e:
-                reason = " ".join(str(e).split())[:200]
-                results.append(("LLM test request", "[red]FAIL[/red]",
-                                f"{reason} -- check the key, LLM_MODEL and quota"))
-            finally:
-                client.close()
+            results.append((label, ok_mark, f"{desc} (test skipped)"))
+            continue
+        try:
+            client.check()
+            results.append((label, ok_mark, f"{desc} -- answered"))
+        except Exception as e:
+            reason = " ".join(str(e).split())[:200]
+            hint = {"claude-cli": "run `claude` once to log in",
+                    "codex-cli": "run `codex login`",
+                    "gemini-cli": "run `gemini` once and sign in with Google"}.get(provider,
+                    "check the key, model name and quota")
+            results.append((label, "[red]FAIL[/red]", f"{desc}: {reason} -- {hint}"))
 
     # --- Tier 3 checks ---
     # Claude Code CLI
