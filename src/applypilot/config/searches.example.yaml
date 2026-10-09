@@ -61,7 +61,10 @@ locations:
   - location: "Remote"
     remote: true
 
-# Location filtering -- accept/reject patterns for job location text
+# Location filtering -- accept/reject patterns for job location text.
+# Remote jobs always pass. A reject match always fails. If accept_patterns is
+# empty or missing, every non-rejected location passes; if it has entries, a
+# non-remote job must match one of them.
 location:
   accept_patterns:
     - "San Francisco"
@@ -82,21 +85,24 @@ location:
     - "India"
     - "Philippines"
 
-# Country for Indeed/LinkedIn/Google Jobs searches
+# Country for Indeed/Glassdoor searches (same as defaults.country_indeed)
 country: "USA"
 
-# JobSpy source boards (all available options shown)
+# JobSpy source boards. `sites:` works too. Defaults to indeed + linkedin.
+# Also available: glassdoor, google, bayt, naukri, bdjobs, hellowork.
+# zip_recruiter is left out: its Cloudflare front currently answers every
+# JobSpy request with "403 forbidden aa".
 boards:
   - indeed
   - linkedin
   - glassdoor
-  - zip_recruiter
   - google
 
 # Search defaults
 defaults:
   results_per_site: 100  # Max results per board per query
   hours_old: 72          # Only jobs posted within this many hours
+  distance: 25           # Radius in miles for non-remote locations (JobSpy default: 50)
 
 # Negative keywords -- skip jobs with these in the title (case-insensitive)
 exclude_titles:

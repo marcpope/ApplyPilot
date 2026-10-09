@@ -9,6 +9,8 @@ schemas and treats an empty accept list as "accept everything not rejected".
 """
 from __future__ import annotations
 
+import re
+
 _REMOTE_MARKERS = ("remote", "anywhere", "work from home", "wfh", "distributed")
 
 
@@ -52,3 +54,39 @@ def location_ok(location: str | None, accept: list[str], reject: list[str]) -> b
             return True
 
     return False
+
+
+# -- Title exclusion ----------------------------------------------------------
+
+_title_excludes: list[str] | None = None
+
+
+def title_excludes() -> list[str]:
+    """Lowercased ``exclude_titles`` patterns from the user's search config.
+
+    Loaded once per process: every discovery source checks titles at insert
+    time, and re-reading YAML per job would be wasteful.
+    """
+    global _title_excludes
+    if _title_excludes is None:
+        from applypilot import config
+        cfg = config.load_search_config() or {}
+        _title_excludes = [str(t).lower() for t in cfg.get("exclude_titles") or [] if str(t).strip()]
+    return _title_excludes
+
+
+def title_ok(title: str | None, excludes: list[str] | None = None) -> bool:
+    """False when the job title contains an ``exclude_titles`` pattern.
+
+    Patterns match whole words, case-insensitively: "intern" excludes
+    "Software Intern" but not "Internal Tools Engineer", and "VP" doesn't
+    fire inside "MVP".
+    """
+    if not title:
+        return True
+    excludes = title_excludes() if excludes is None else excludes
+    low = title.lower()
+    return not any(
+        re.search(rf"(?<!\w){re.escape(pattern.strip())}(?!\w)", low)
+        for pattern in excludes if pattern.strip()
+    )

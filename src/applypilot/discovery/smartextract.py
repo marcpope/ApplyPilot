@@ -29,10 +29,10 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 from applypilot import config
-from applypilot.config import CONFIG_DIR
+from applypilot.config import config_file
 from applypilot.database import get_connection, init_db, store_jobs, get_stats
 from applypilot.llm import get_client
-from applypilot.locfilter import load_location_filter, location_ok as _location_ok
+from applypilot.locfilter import load_location_filter, location_ok as _location_ok, title_ok
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ def _load_location_filter(search_cfg: dict | None = None):
 
 def load_sites() -> list[dict]:
     """Load scraping target sites from config/sites.yaml."""
-    path = CONFIG_DIR / "sites.yaml"
+    path = config_file("sites.yaml")
     if not path.exists():
         log.warning("sites.yaml not found at %s", path)
         return []
@@ -92,6 +92,9 @@ def _store_jobs_filtered(
         if not _location_ok(job.get("location"), accept_locs, reject_locs):
             filtered += 1
             continue
+        if not title_ok(job.get("title")):
+            filtered += 1
+            continue
         try:
             # Prefer a parsed company; fall back to the site name (direct career
             # sites are themselves the employer).
@@ -107,7 +110,7 @@ def _store_jobs_filtered(
             existing += 1
 
     if filtered:
-        log.info("Filtered %d jobs (wrong location)", filtered)
+        log.info("Filtered %d jobs (location or excluded title)", filtered)
     conn.commit()
     return new, existing
 
@@ -156,7 +159,12 @@ def collect_page_intelligence(url: str, headless: bool = True) -> dict:
         page.on("response", on_response)
 
         page.goto(url, timeout=60000)
-        page.wait_for_load_state("networkidle")
+        # Sites with analytics/polling traffic never go idle; the default 30s
+        # timeout used to abort intel collection for the whole site.
+        try:
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            log.debug("Network never went idle for %s; continuing with what loaded", url)
 
         intel["page_title"] = page.title()
 

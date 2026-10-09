@@ -16,7 +16,7 @@ from jobspy import scrape_jobs
 
 from applypilot import config
 from applypilot.database import get_connection, init_db, store_jobs
-from applypilot.locfilter import load_location_filter, location_ok
+from applypilot.locfilter import load_location_filter, location_ok, title_ok
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +82,46 @@ _load_location_config = load_location_filter
 _location_ok = location_ok
 
 
+# -- Config helpers ----------------------------------------------------------
+
+# ZipRecruiter's Cloudflare front blocks JobSpy with "403 forbidden aa" on
+# every request, so it's opt-in only.
+DEFAULT_SITES = ["indeed", "linkedin"]
+
+KNOWN_SITES = {"linkedin", "indeed", "zip_recruiter", "glassdoor", "google",
+               "bayt", "naukri", "bdjobs", "hellowork"}
+
+
+def _resolve_sites(cfg: dict) -> list[str]:
+    """Return the JobSpy boards to search.
+
+    The example config and older wizards write ``boards:``; earlier code only
+    read ``sites:``, so user choices were silently ignored. Accept both, and
+    drop unknown names (one typo would otherwise fail every search).
+    """
+    configured = cfg.get("sites") or cfg.get("boards")
+    if not configured:
+        return list(DEFAULT_SITES)
+    sites = []
+    for name in configured:
+        key = str(name).strip().lower().replace("-", "_").replace(" ", "_")
+        if key == "ziprecruiter":
+            key = "zip_recruiter"
+        if key in KNOWN_SITES:
+            sites.append(key)
+        else:
+            log.warning("Ignoring unknown job board %r (known: %s)", name, ", ".join(sorted(KNOWN_SITES)))
+    return sites or list(DEFAULT_SITES)
+
+
+def _clean(value) -> str | None:
+    """Normalize a JobSpy cell: NaN/None/empty become None, not the string 'None'."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return None if text.lower() in ("", "nan", "none", "null") else text
+
+
 # -- DB storage (JobSpy DataFrame -> SQLite) ---------------------------------
 
 def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tuple[int, int]:
@@ -91,13 +131,13 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
     existing = 0
 
     for _, row in df.iterrows():
-        url = str(row.get("job_url", ""))
-        if not url or url == "nan":
+        url = _clean(row.get("job_url"))
+        if not url:
             continue
 
-        title = str(row.get("title", "")) if str(row.get("title", "")) != "nan" else None
-        company = str(row.get("company", "")) if str(row.get("company", "")) != "nan" else None
-        location_str = str(row.get("location", "")) if str(row.get("location", "")) != "nan" else None
+        title = _clean(row.get("title"))
+        company = _clean(row.get("company"))
+        location_str = _clean(row.get("location"))
 
         # Build salary string from min/max
         salary = None
@@ -113,9 +153,10 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
             if interval:
                 salary += f"/{interval}"
 
-        description = str(row.get("description", "")) if str(row.get("description", "")) != "nan" else None
+        description = _clean(row.get("description"))
         site_name = str(row.get("site", source_label))
-        is_remote = row.get("is_remote", False)
+        # NaN is truthy, so compare explicitly rather than `if is_remote`.
+        is_remote = _clean(row.get("is_remote")) in ("True", "true", "1")
 
         site_label = f"{site_name}"
         if is_remote:
@@ -131,7 +172,7 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
             detail_scraped_at = now
 
         # Extract apply URL if JobSpy provided it
-        apply_url = str(row.get("job_url_direct", "")) if str(row.get("job_url_direct", "")) != "nan" else None
+        apply_url = _clean(row.get("job_url_direct"))
 
         try:
             conn.execute(
@@ -190,6 +231,11 @@ def _run_one_search(
         }
         if s.get("remote"):
             kwargs["is_remote"] = True
+        elif defaults.get("distance"):
+            kwargs["distance"] = int(defaults["distance"])
+        if "google" in other_sites:
+            # JobSpy's Google scraper ignores search_term and needs this instead.
+            kwargs["google_search_term"] = f"{s['query']} jobs near {s['location']}"
         if proxy_config:
             kwargs["proxies"] = [proxy_config["jobspy"]]
         if "linkedin" in other_sites:
@@ -213,6 +259,8 @@ def _run_one_search(
         }
         if s.get("remote"):
             gd_kwargs["is_remote"] = True
+        elif defaults.get("distance"):
+            gd_kwargs["distance"] = int(defaults["distance"])
         if proxy_config:
             gd_kwargs["proxies"] = [proxy_config["jobspy"]]
         try:
@@ -242,6 +290,8 @@ def _run_one_search(
         accept_locs, reject_locs,
     ), axis=1)]
     filtered = before - len(df)
+    df = df[df.apply(lambda row: title_ok(_clean(row.get("title"))), axis=1)]
+    excluded = before - filtered - len(df)
 
     conn = get_connection()
     new, existing = store_jobspy_results(conn, df, s["query"])
@@ -249,7 +299,12 @@ def _run_one_search(
     msg = f"[{label}] {before} results -> {new} new, {existing} dupes"
     if filtered:
         msg += f", {filtered} filtered (location)"
+    if excluded:
+        msg += f", {excluded} excluded (title)"
     log.info(msg)
+    if before and filtered == before:
+        log.warning("[%s] the location filter removed every result; check location.accept_patterns "
+                    "in searches.yaml", label)
 
     return {"new": new, "existing": existing, "errors": 0, "filtered": filtered, "total": before, "label": label}
 
@@ -268,7 +323,7 @@ def search_jobs(
 ) -> dict:
     """Run a single job search via JobSpy and store results in DB."""
     if sites is None:
-        sites = ["indeed", "linkedin", "zip_recruiter"]
+        sites = list(DEFAULT_SITES)
 
     proxy_config = parse_proxy(proxy) if proxy else None
 
@@ -336,12 +391,16 @@ def _full_crawl(
 ) -> dict:
     """Run all search queries from search config across all locations."""
     if sites is None:
-        sites = ["indeed", "linkedin", "zip_recruiter"]
+        sites = list(DEFAULT_SITES)
 
     # Build search combinations from config
     queries = search_cfg.get("queries", [])
     locs = search_cfg.get("locations", [])
-    defaults = search_cfg.get("defaults", {})
+    defaults = dict(search_cfg.get("defaults") or {})
+    # The example config documents a top-level `country:`; older code only read
+    # defaults.country_indeed.
+    if not defaults.get("country_indeed") and search_cfg.get("country"):
+        defaults["country_indeed"] = str(search_cfg["country"]).lower()
     glassdoor_map = search_cfg.get("glassdoor_location_map", {})
     accept_locs, reject_locs = _load_location_config(search_cfg)
 
@@ -428,7 +487,7 @@ def run_discovery(cfg: dict | None = None) -> dict:
         return {"new": 0, "existing": 0, "errors": 0, "db_total": 0, "queries": 0}
 
     proxy = cfg.get("proxy")
-    sites = cfg.get("sites")
+    sites = _resolve_sites(cfg)
     results_per_site = cfg.get("defaults", {}).get("results_per_site", 100)
     hours_old = cfg.get("defaults", {}).get("hours_old", 72)
     tiers = cfg.get("tiers")

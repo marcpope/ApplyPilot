@@ -151,7 +151,10 @@ def resolve_wttj_urls(conn: sqlite3.Connection) -> int:
             "https://www.welcometothejungle.com/en/jobs?query=developer&refinementList%5Bremote%5D%5B%5D=fulltime",
             timeout=60000,
         )
-        page.wait_for_load_state("networkidle")
+        try:
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass  # captured Algolia responses are checked below
         browser.close()
 
     if not algolia_data.get("response"):

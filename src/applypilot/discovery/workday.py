@@ -20,9 +20,9 @@ from html.parser import HTMLParser
 import yaml
 
 from applypilot import config
-from applypilot.config import CONFIG_DIR
+from applypilot.config import config_file
 from applypilot.database import get_connection, init_db
-from applypilot.locfilter import load_location_filter, location_ok as _location_ok
+from applypilot.locfilter import load_location_filter, location_ok as _location_ok, title_ok
 
 log = logging.getLogger(__name__)
 
@@ -30,8 +30,8 @@ log = logging.getLogger(__name__)
 # -- Employer registry from YAML --------------------------------------------
 
 def load_employers() -> dict:
-    """Load Workday employer registry from config/employers.yaml."""
-    path = CONFIG_DIR / "employers.yaml"
+    """Load the Workday employer registry (~/.applypilot/employers.yaml if present)."""
+    path = config_file("employers.yaml")
     if not path.exists():
         log.warning("employers.yaml not found at %s", path)
         return {}
@@ -204,6 +204,8 @@ def search_employer(
             if location_filter and accept_locs is not None and reject_locs is not None:
                 if not _location_ok(loc, accept_locs, reject_locs):
                     continue
+            if not title_ok(j.get("title")):
+                continue
 
             all_jobs.append({
                 "title": j.get("title", ""),

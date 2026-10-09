@@ -30,6 +30,16 @@ PACKAGE_DIR = Path(__file__).parent
 CONFIG_DIR = PACKAGE_DIR / "config"
 
 
+def config_file(name: str) -> Path:
+    """Return a registry file, preferring the user's copy in APP_DIR.
+
+    Files inside site-packages are lost on upgrade, so users customize
+    employers.yaml / sites.yaml by copying them into APPLYPILOT_DIR.
+    """
+    user_copy = APP_DIR / name
+    return user_copy if user_copy.exists() else CONFIG_DIR / name
+
+
 def get_chrome_path() -> str:
     """Auto-detect Chrome/Chromium executable path, cross-platform.
 
@@ -136,7 +146,7 @@ def load_search_config() -> dict:
 def load_sites_config() -> dict:
     """Load sites.yaml configuration (sites list, manual_ats, blocked, etc.)."""
     import yaml
-    path = CONFIG_DIR / "sites.yaml"
+    path = config_file("sites.yaml")
     if not path.exists():
         return {}
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
