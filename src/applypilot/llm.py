@@ -2,24 +2,46 @@
 Unified LLM client for ApplyPilot.
 
 Auto-detects provider from environment:
-  GEMINI_API_KEY  -> Google Gemini (default: gemini-2.0-flash)
+  LLM_URL         -> Any OpenAI-compatible endpoint (Ollama, llama.cpp,
+                     DeepSeek, OpenRouter...). LLM_API_KEY is sent if set.
+  GEMINI_API_KEY  -> Google Gemini (default: gemini-2.5-flash)
   OPENAI_API_KEY  -> OpenAI (default: gpt-4o-mini)
-  LLM_URL         -> Local llama.cpp / Ollama compatible endpoint
 
 LLM_MODEL env var overrides the model name for any provider.
 """
 
 import logging
 import os
+import re
 import time
+from urllib.parse import urlparse
 
 import httpx
 
 log = logging.getLogger(__name__)
 
+# gemini-2.0-flash returns 404 for API keys created after early 2026.
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+
+_OLLAMA_PORT = 11434
+
 # ---------------------------------------------------------------------------
 # Provider detection
 # ---------------------------------------------------------------------------
+
+def _normalize_local_url(url: str) -> str:
+    """Return the OpenAI-compatible base URL for a user-supplied LLM_URL.
+
+    Ollama serves the OpenAI-compatible API under /v1, but users often paste
+    the bare server address (http://localhost:11434), which makes every
+    request 404 on /chat/completions.
+    """
+    url = url.rstrip("/")
+    parsed = urlparse(url)
+    if parsed.port == _OLLAMA_PORT and parsed.path in ("", "/"):
+        return f"{url}/v1"
+    return url
+
 
 def _detect_provider() -> tuple[str, str, str]:
     """Return (base_url, model, api_key) based on environment variables.
@@ -35,7 +57,7 @@ def _detect_provider() -> tuple[str, str, str]:
     if gemini_key and not local_url:
         return (
             "https://generativelanguage.googleapis.com/v1beta/openai",
-            model_override or "gemini-2.0-flash",
+            model_override or DEFAULT_GEMINI_MODEL,
             gemini_key,
         )
 
@@ -48,7 +70,7 @@ def _detect_provider() -> tuple[str, str, str]:
 
     if local_url:
         return (
-            local_url.rstrip("/"),
+            _normalize_local_url(local_url),
             model_override or "local-model",
             os.environ.get("LLM_API_KEY", ""),
         )
@@ -142,7 +164,10 @@ class LLMClient:
         )
         resp.raise_for_status()
         data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        candidate = (data.get("candidates") or [{}])[0]
+        parts = (candidate.get("content") or {}).get("parts") or []
+        text = "".join(p.get("text", "") for p in parts)
+        return _finish_text(text, candidate.get("finishReason"))
 
     # -- OpenAI-compat API --------------------------------------------------
 
@@ -181,7 +206,9 @@ class LLMClient:
     def _handle_compat_response(resp: httpx.Response) -> str:
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        choice = (data.get("choices") or [{}])[0]
+        content = (choice.get("message") or {}).get("content")
+        return _finish_text(content, choice.get("finish_reason"))
 
     # -- public API ---------------------------------------------------------
 
@@ -192,12 +219,16 @@ class LLMClient:
         max_tokens: int = 4096,
     ) -> str:
         """Send a chat completion request and return the assistant message text."""
-        # Qwen3 optimization: prepend /no_think to skip chain-of-thought
-        # reasoning, saving tokens on structured extraction tasks.
-        if "qwen" in self.model.lower() and messages:
-            first = messages[0]
-            if first.get("role") == "user" and not first["content"].startswith("/no_think"):
-                messages = [{"role": first["role"], "content": f"/no_think\n{first['content']}"}] + messages[1:]
+        # Qwen3 optimization: prepend /no_think to the first user message to
+        # skip chain-of-thought reasoning, saving tokens on structured tasks.
+        # Most prompts lead with a system message, so look past it.
+        if "qwen" in self.model.lower():
+            for i, msg in enumerate(messages):
+                if msg.get("role") == "user":
+                    if not msg["content"].startswith("/no_think"):
+                        messages = list(messages)
+                        messages[i] = {**msg, "content": f"/no_think\n{msg['content']}"}
+                    break
 
         for attempt in range(_MAX_RETRIES):
             try:
@@ -250,7 +281,12 @@ class LLMClient:
                     )
                     time.sleep(wait)
                     continue
-                raise
+                # Surface the provider's explanation (e.g. "model is no longer
+                # available to new users") instead of a bare status line.
+                raise RuntimeError(
+                    f"LLM request failed: HTTP {resp.status_code} from {resp.request.url.host} "
+                    f"(model '{self.model}'): {resp.text[:300]}"
+                ) from exc
 
             except httpx.TimeoutException:
                 if attempt < _MAX_RETRIES - 1:
@@ -271,6 +307,27 @@ class LLMClient:
 
     def close(self) -> None:
         self._client.close()
+
+
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.S | re.I)
+
+
+def _finish_text(content: str | None, finish_reason: str | None) -> str:
+    """Clean a completion and fail loudly when it came back empty.
+
+    Reasoning models (qwen3, deepseek-r1, Gemini 2.5) can spend the whole
+    token budget thinking and return no visible text. Callers used to parse
+    that as a garbage result (e.g. a fit score of 0), so raise instead and let
+    the stage leave the job pending.
+    """
+    text = _THINK_BLOCK.sub("", content or "").strip()
+    if not text:
+        raise RuntimeError(
+            f"LLM returned an empty response (finish_reason={finish_reason}). "
+            "Reasoning models can use up the token budget before answering; "
+            "try a non-reasoning model or a larger model."
+        )
+    return text
 
 
 class _GeminiCompatForbidden(Exception):

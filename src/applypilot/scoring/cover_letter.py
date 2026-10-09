@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
-from applypilot.scoring.tailor import make_filename_prefix
+from applypilot.scoring.tailor import MAX_CONSECUTIVE_ERRORS, make_filename_prefix
 from applypilot.scoring.validator import (
     BANNED_WORDS,
     LLM_LEAK_PHRASES,
@@ -166,7 +166,7 @@ def generate_cover_letter(
             )},
         ]
 
-        letter = client.chat(messages, max_tokens=1024, temperature=0.7)
+        letter = client.chat(messages, max_tokens=4096, temperature=0.7)
         letter = sanitize_text(letter)  # auto-fix em dashes, smart quotes
         letter = _strip_preamble(letter)  # remove any "Here is the letter:" prefix
 
@@ -234,8 +234,9 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
     )
     t0 = time.time()
     completed = 0
-    results: list[dict] = []
+    saved = 0
     error_count = 0
+    consecutive_errors = 0
 
     for job in jobs:
         completed += 1
@@ -251,55 +252,41 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
 
             # Generate PDF (best-effort). Use the letter renderer, NOT the resume
             # converter, which drops a cover letter's body.
-            pdf_path = None
             try:
                 from applypilot.scoring.pdf import convert_letter_to_pdf
                 applicant_name = profile.get("personal", {}).get("full_name", "")
-                pdf_path = str(convert_letter_to_pdf(cl_path, applicant_name=applicant_name))
-            except Exception:
-                log.debug("PDF generation failed for %s", cl_path, exc_info=True)
+                convert_letter_to_pdf(cl_path, applicant_name=applicant_name)
+            except Exception as e:
+                log.warning("PDF generation failed for %s: %s", cl_path.name, e)
 
-            result = {
-                "url": job["url"],
-                "path": str(cl_path),
-                "pdf_path": pdf_path,
-                "title": job["title"],
-                "site": job["site"],
-            }
-            results.append(result)
+            # Commit each letter as it lands so an interrupt keeps finished work.
+            conn.execute(
+                "UPDATE jobs SET cover_letter_path=?, cover_letter_at=?, "
+                "cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
+                (str(cl_path), datetime.now(timezone.utc).isoformat(), job["url"]),
+            )
+            conn.commit()
+            saved += 1
+            consecutive_errors = 0
 
             elapsed = time.time() - t0
             rate = completed / elapsed if elapsed > 0 else 0
             log.info(
                 "%d/%d [OK] | %.1f jobs/min | %s",
-                completed, len(jobs), rate * 60, result["title"][:40],
+                completed, len(jobs), rate * 60, job["title"][:40],
             )
         except Exception as e:
-            result = {
-                "url": job["url"], "title": job["title"], "site": job["site"],
-                "path": None, "pdf_path": None, "error": str(e),
-            }
+            # LLM/infrastructure failure: leave cover_attempts alone so the job
+            # isn't retired for something that wasn't its fault.
             error_count += 1
-            results.append(result)
+            consecutive_errors += 1
             log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), job["title"][:40], e)
-
-    # Persist to DB: increment attempt counter for ALL, save path only for successes
-    now = datetime.now(timezone.utc).isoformat()
-    saved = 0
-    for r in results:
-        if r.get("path"):
-            conn.execute(
-                "UPDATE jobs SET cover_letter_path=?, cover_letter_at=?, "
-                "cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
-                (r["path"], now, r["url"]),
-            )
-            saved += 1
-        else:
-            conn.execute(
-                "UPDATE jobs SET cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
-                (r["url"],),
-            )
-    conn.commit()
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                log.error(
+                    "Stopping cover letters after %d consecutive LLM errors. "
+                    "Remaining jobs stay pending.", consecutive_errors,
+                )
+                break
 
     elapsed = time.time() - t0
     log.info("Cover letters done in %.1fs: %d generated, %d errors", elapsed, saved, error_count)

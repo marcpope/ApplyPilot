@@ -17,6 +17,8 @@ from applypilot.llm import get_client
 
 log = logging.getLogger(__name__)
 
+MAX_CONSECUTIVE_ERRORS = 5  # stop the stage when the LLM keeps failing
+
 
 # ── Scoring Prompt ────────────────────────────────────────────────────────
 
@@ -95,7 +97,7 @@ def score_job(resume_text: str, job: dict) -> dict:
 
     try:
         client = get_client()
-        response = client.chat(messages, max_tokens=512, temperature=0.2)
+        response = client.chat(messages, max_tokens=4096, temperature=0.2)
         return _parse_score_response(response)
     except Exception as e:
         log.error("LLM error scoring job '%s': %s", job.get("title", "?"), e)
@@ -115,6 +117,14 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     """
     resume_text = RESUME_PATH.read_text(encoding="utf-8")
     conn = get_connection()
+
+    # Older versions stored failed LLM calls as fit_score=0. Real scores are
+    # clamped to 1-10, so a 0 is always a failure: put those jobs back in the
+    # queue instead of leaving them silently below every min_score.
+    reset = conn.execute("UPDATE jobs SET fit_score = NULL WHERE fit_score = 0").rowcount
+    if reset:
+        conn.commit()
+        log.info("Re-queued %d job(s) left with score 0 by earlier failed scoring runs.", reset)
 
     if rescore:
         query = "SELECT * FROM jobs WHERE full_description IS NOT NULL"
@@ -137,6 +147,7 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     t0 = time.time()
     completed = 0
     errors = 0
+    consecutive_errors = 0
     results: list[dict] = []
 
     for job in jobs:
@@ -150,11 +161,21 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
             # Parse/LLM failure -- leave fit_score NULL so it's retried, don't
             # burn the result by persisting a permanent 0.
             errors += 1
+            consecutive_errors += 1
             log.warning(
-                "[%d/%d] score failed (left pending)  %s",
-                completed, len(jobs), job.get("title", "?")[:60],
+                "[%d/%d] score failed (left pending)  %s -- %s",
+                completed, len(jobs), job.get("title", "?")[:60], result["reasoning"][:200],
             )
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                log.error(
+                    "Stopping scoring after %d consecutive failures (quota exhausted, wrong "
+                    "model name, or provider down?). Remaining jobs stay pending.",
+                    consecutive_errors,
+                )
+                break
             continue
+
+        consecutive_errors = 0
 
         # Commit each score as it lands so an interrupt doesn't discard the run.
         now = datetime.now(timezone.utc).isoformat()

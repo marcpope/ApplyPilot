@@ -126,7 +126,8 @@ def sanitize_text(text: str) -> str:
 
 # ── JSON Field Validation ─────────────────────────────────────────────────
 
-def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dict:
+def validate_json_fields(data: dict, profile: dict, mode: str = "normal",
+                         original_text: str = "") -> dict:
     """Validate individual JSON fields from an LLM-generated tailored resume.
 
     Args:
@@ -136,6 +137,8 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
                  strict  → banned words are errors (trigger retries)
                  normal  → banned words are warnings (no retry)
                  lenient → banned words ignored entirely
+        original_text: The candidate's base resume. Watchlist terms that
+                 already appear in it are real skills, not fabrications.
 
     Returns:
         {"passed": bool, "errors": list[str], "warnings": list[str]}
@@ -143,10 +146,13 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
     errors: list[str] = []
     warnings: list[str] = []
 
-    # Required keys — always checked regardless of mode
-    for key in ("title", "summary", "skills", "experience", "projects", "education"):
+    # Required keys — always checked regardless of mode. Projects may be empty:
+    # plenty of real resumes have no projects section.
+    for key in ("title", "summary", "skills", "experience", "education"):
         if key not in data or not data[key]:
             errors.append(f"Missing required field: {key}")
+    if not isinstance(data.get("projects", []), list):
+        errors.append("Field 'projects' must be a list")
     if errors:
         return {"passed": False, "errors": errors, "warnings": warnings}
 
@@ -154,8 +160,8 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
     all_text_parts: list[str] = [data["summary"]]
 
     # Skills: check for fabrication (always enforced), but never flag a tool the
-    # candidate actually lists in their profile.
-    allowed = _build_skills_set(profile)
+    # candidate actually lists in their profile or base resume.
+    allowed = _build_skills_set(profile) | set(find_watchlist_hits(original_text, set()))
     if isinstance(data["skills"], dict):
         skills_text = " ".join(str(v) for v in data["skills"].values())
         for fake in find_watchlist_hits(skills_text, allowed):
@@ -178,7 +184,7 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
                 all_text_parts.append(b)
 
     # Projects: collect bullets
-    if isinstance(data["projects"], list):
+    if isinstance(data.get("projects"), list):
         for entry in data["projects"]:
             for b in entry.get("bullets", []):
                 all_text_parts.append(b)

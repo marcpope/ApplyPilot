@@ -31,6 +31,9 @@ from applypilot.scoring.validator import (
 log = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 5  # max cross-run retries before giving up
+MAX_CONSECUTIVE_ERRORS = 5  # stop the stage when the LLM keeps failing
+
+_SUCCESS_STATUSES = ("approved", "approved_with_judge_warning")
 
 
 def make_filename_prefix(job: dict) -> str:
@@ -103,13 +106,13 @@ TITLE: Match the target role. Keep seniority (Senior/Lead/Staff). Drop company s
 
 SUMMARY: Rewrite from scratch. Lead with the 1-2 skills that matter most for THIS role. Sound like someone who's done this job.
 
-SKILLS: Reorder each category so the job's must-haves appear first.
+SKILLS: Reorder each category so the job's must-haves appear first. Keep the candidate's real skills; reorder, don't delete. Each category value is a comma-separated string.
 
 Reframe EVERY bullet for this role. Same real work, different angle. Every bullet must be reworded. Never copy verbatim.
 
-PROJECTS: Reorder by relevance. Drop irrelevant projects entirely.
+PROJECTS: Reorder by relevance. Drop irrelevant projects entirely. If the resume has no projects, return an empty list.
 
-BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, Designed, Implemented, Reduced, Automated, Deployed, Operated, Optimized). Most relevant first. Max 4 per section.
+BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, Designed, Implemented, Reduced, Automated, Deployed, Operated, Optimized). Most relevant first. Every experience entry keeps at least 2 bullets. Max 4 per section.
 
 ## VOICE:
 - Write like a real engineer. Short, direct.
@@ -124,7 +127,7 @@ BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, De
 - Do NOT change real numbers ({metrics_str})
 - Preserved companies: {companies_str} -- names stay as-is
 - Preserved school: {school}
-- Must fit 1 page.
+- Aim for one page by trimming bullets. Never drop a preserved company or a job to save space.
 
 ## OUTPUT: Return ONLY valid JSON. No markdown fences. No commentary. No "here is" preamble.
 
@@ -234,6 +237,19 @@ def extract_json(raw: str) -> dict:
 
 # ── Resume Assembly (profile-driven header) ──────────────────────────────
 
+def _as_text(val) -> str:
+    """Render an LLM JSON value as resume text.
+
+    Models often return skills as lists and education as objects; str() on
+    those printed Python reprs like "['Java', 'Python']" into the resume.
+    """
+    if isinstance(val, (list, tuple)):
+        return ", ".join(_as_text(v) for v in val if v not in (None, ""))
+    if isinstance(val, dict):
+        return " | ".join(_as_text(v) for v in val.values() if v not in (None, ""))
+    return "" if val is None else str(val)
+
+
 def assemble_resume_text(data: dict, profile: dict) -> str:
     """Convert JSON resume data to formatted plain text.
 
@@ -281,7 +297,7 @@ def assemble_resume_text(data: dict, profile: dict) -> str:
     lines.append("TECHNICAL SKILLS")
     if isinstance(data["skills"], dict):
         for cat, val in data["skills"].items():
-            lines.append(f"{cat}: {sanitize_text(str(val))}")
+            lines.append(f"{cat}: {sanitize_text(_as_text(val))}")
     lines.append("")
 
     # Experience
@@ -294,9 +310,10 @@ def assemble_resume_text(data: dict, profile: dict) -> str:
             lines.append(f"- {sanitize_text(b)}")
         lines.append("")
 
-    # Projects
-    lines.append("PROJECTS")
-    for entry in data.get("projects", []):
+    # Projects (optional -- omit the header when the candidate has none)
+    if data.get("projects"):
+        lines.append("PROJECTS")
+    for entry in data.get("projects") or []:
         lines.append(sanitize_text(entry.get("header", "")))
         if entry.get("subtitle"):
             lines.append(sanitize_text(entry["subtitle"]))
@@ -306,7 +323,9 @@ def assemble_resume_text(data: dict, profile: dict) -> str:
 
     # Education
     lines.append("EDUCATION")
-    lines.append(sanitize_text(str(data.get("education", ""))))
+    education = data.get("education", "")
+    for item in (education if isinstance(education, list) else [education]):
+        lines.append(sanitize_text(_as_text(item)))
 
     return "\n".join(lines)
 
@@ -340,7 +359,7 @@ def judge_tailored_resume(
     ]
 
     client = get_client()
-    response = client.chat(messages, max_tokens=512, temperature=0.1)
+    response = client.chat(messages, max_tokens=4096, temperature=0.1)
 
     passed = "VERDICT: PASS" in response.upper()
     issues = "none"
@@ -414,7 +433,7 @@ def tailor_resume(
             {"role": "user", "content": f"ORIGINAL RESUME:\n{resume_text}\n\n---\n\nTARGET JOB:\n{job_text}\n\nReturn the JSON:"},
         ]
 
-        raw = client.chat(messages, max_tokens=2048, temperature=0.4)
+        raw = client.chat(messages, max_tokens=16384, temperature=0.4)
 
         # Parse JSON from response
         try:
@@ -424,7 +443,8 @@ def tailor_resume(
             continue
 
         # Layer 1: Validate JSON fields
-        validation = validate_json_fields(data, profile, mode=validation_mode)
+        validation = validate_json_fields(data, profile, mode=validation_mode,
+                                          original_text=resume_text)
         report["validator"] = validation
 
         if not validation["passed"]:
@@ -495,8 +515,8 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
     log.info("Tailoring resumes for %d jobs (score >= %d)...", len(jobs), min_score)
     t0 = time.time()
     completed = 0
-    results: list[dict] = []
-    stats: dict[str, int] = {"approved": 0, "failed_validation": 0, "failed_judge": 0, "error": 0}
+    consecutive_errors = 0
+    stats: dict[str, int] = {}
 
     for job in jobs:
         completed += 1
@@ -530,12 +550,14 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             # Generate PDF for approved resumes (best-effort)
             # "approved_with_judge_warning" is also a success — resume was generated.
             pdf_path = None
-            if report["status"] in ("approved", "approved_with_judge_warning"):
+            if report["status"] in _SUCCESS_STATUSES:
                 try:
                     from applypilot.scoring.pdf import convert_to_pdf
                     pdf_path = str(convert_to_pdf(txt_path))
-                except Exception:
-                    log.debug("PDF generation failed for %s", txt_path, exc_info=True)
+                except Exception as e:
+                    # Auto-apply needs the PDF, so don't hide this at debug level.
+                    log.warning("PDF generation failed for %s: %s (fix, then run `applypilot run pdf`)",
+                                txt_path.name, e)
 
             result = {
                 "url": job["url"],
@@ -553,8 +575,23 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             }
             log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), job["title"][:40], e)
 
-        results.append(result)
-        stats[result.get("status", "error")] = stats.get(result.get("status", "error"), 0) + 1
+        stats[result["status"]] = stats.get(result["status"], 0) + 1
+
+        # Commit each job as it finishes so an interrupt keeps finished work.
+        # LLM/infrastructure errors don't count as a tailoring attempt: the job
+        # wasn't at fault, and burning attempts would retire it permanently.
+        if result["status"] in _SUCCESS_STATUSES:
+            conn.execute(
+                "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
+                "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
+                (result["path"], datetime.now(timezone.utc).isoformat(), result["url"]),
+            )
+        elif result["status"] != "error":
+            conn.execute(
+                "UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
+                (result["url"],),
+            )
+        conn.commit()
 
         elapsed = time.time() - t0
         rate = completed / elapsed if elapsed > 0 else 0
@@ -567,36 +604,31 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             result["title"][:40],
         )
 
-    # Persist to DB: increment attempt counter for ALL, save path only for approved
-    now = datetime.now(timezone.utc).isoformat()
-    _success_statuses = {"approved", "approved_with_judge_warning"}
-    for r in results:
-        if r["status"] in _success_statuses:
-            conn.execute(
-                "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
-                "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                (r["path"], now, r["url"]),
+        consecutive_errors = consecutive_errors + 1 if result["status"] == "error" else 0
+        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+            log.error(
+                "Stopping tailoring after %d consecutive LLM errors (quota exhausted or "
+                "provider down?). Remaining jobs stay pending.", consecutive_errors,
             )
-        else:
-            conn.execute(
-                "UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                (r["url"],),
-            )
-    conn.commit()
+            break
 
     elapsed = time.time() - t0
+    approved = sum(stats.get(s, 0) for s in _SUCCESS_STATUSES)
+    failed = stats.get("failed_validation", 0) + stats.get("exhausted_retries", 0)
     log.info(
-        "Tailoring done in %.1fs: %d approved, %d failed_validation, %d failed_judge, %d errors",
+        "Tailoring done in %.1fs: %d approved (%d with judge warning), %d failed_validation, "
+        "%d exhausted_retries (no valid JSON from the model), %d errors",
         elapsed,
-        stats.get("approved", 0),
+        approved,
+        stats.get("approved_with_judge_warning", 0),
         stats.get("failed_validation", 0),
-        stats.get("failed_judge", 0),
+        stats.get("exhausted_retries", 0),
         stats.get("error", 0),
     )
 
     return {
-        "approved": stats.get("approved", 0),
-        "failed": stats.get("failed_validation", 0) + stats.get("failed_judge", 0),
+        "approved": approved,
+        "failed": failed,
         "errors": stats.get("error", 0),
         "elapsed": elapsed,
     }

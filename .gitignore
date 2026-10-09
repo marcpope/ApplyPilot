@@ -39,3 +39,8 @@ Thumbs.db
 
 # Claude Code
 .claude/
+
+# Local dev
+.venv/
+.pytest_cache/
+__pycache__/
