@@ -433,7 +433,7 @@ def tailor_resume(
             {"role": "user", "content": f"ORIGINAL RESUME:\n{resume_text}\n\n---\n\nTARGET JOB:\n{job_text}\n\nReturn the JSON:"},
         ]
 
-        raw = client.chat(messages, max_tokens=16384, temperature=0.4)
+        raw = client.chat(messages, max_tokens=16384, temperature=0.4, json_mode=True)
 
         # Parse JSON from response
         try:

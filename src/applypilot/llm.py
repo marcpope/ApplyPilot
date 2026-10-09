@@ -13,6 +13,7 @@ LLM_MODEL env var overrides the model name for any provider.
 import logging
 import os
 import re
+import threading
 import time
 from urllib.parse import urlparse
 
@@ -114,6 +115,24 @@ class LLMClient:
         # True once we've confirmed the native Gemini API works for this model
         self._use_native_gemini: bool = False
         self._is_gemini: bool = base_url.startswith(_GEMINI_COMPAT_BASE)
+        # Set when the endpoint rejects response_format; JSON mode is then
+        # skipped and callers fall back to parsing JSON out of free text.
+        self._json_mode_unsupported: bool = False
+        # Optional client-side pacing for free tiers (LLM_RPM requests/minute).
+        rpm = float(os.environ.get("LLM_RPM", "0") or 0)
+        self._min_interval: float = 60.0 / rpm if rpm > 0 else 0.0
+        self._last_request: float = 0.0
+        self._pace_lock = threading.Lock()
+
+    def _pace(self) -> None:
+        """Sleep as needed so requests stay under LLM_RPM."""
+        if not self._min_interval:
+            return
+        with self._pace_lock:
+            wait = self._last_request + self._min_interval - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            self._last_request = time.monotonic()
 
     # -- Native Gemini API --------------------------------------------------
 
@@ -122,6 +141,7 @@ class LLMClient:
         messages: list[dict],
         temperature: float,
         max_tokens: int,
+        json_mode: bool = False,
     ) -> str:
         """Call the native Gemini generateContent API.
 
@@ -154,6 +174,8 @@ class LLMClient:
         }
         if system_parts:
             payload["systemInstruction"] = {"parts": system_parts}
+        if json_mode:
+            payload["generationConfig"]["responseMimeType"] = "application/json"
 
         url = f"{_GEMINI_NATIVE_BASE}/models/{self.model}:generateContent"
         resp = self._client.post(
@@ -176,6 +198,7 @@ class LLMClient:
         messages: list[dict],
         temperature: float,
         max_tokens: int,
+        json_mode: bool = False,
     ) -> str:
         """Call the OpenAI-compatible endpoint."""
         headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -188,12 +211,23 @@ class LLMClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        use_json = json_mode and not self._json_mode_unsupported
+        if use_json:
+            payload["response_format"] = {"type": "json_object"}
 
         resp = self._client.post(
             f"{self.base_url}/chat/completions",
             json=payload,
             headers=headers,
         )
+
+        # Some OpenAI-compatible servers reject response_format. Remember that
+        # and retry once without it; the caller's JSON parsing still applies.
+        if use_json and resp.status_code in (400, 422):
+            log.info("Endpoint rejected response_format; continuing without JSON mode.")
+            self._json_mode_unsupported = True
+            payload.pop("response_format")
+            resp = self._client.post(f"{self.base_url}/chat/completions", json=payload, headers=headers)
 
         # 403 on Gemini compat = model not available on compat layer.
         # Raise a specific sentinel so chat() can switch to native API.
@@ -217,8 +251,14 @@ class LLMClient:
         messages: list[dict],
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        json_mode: bool = False,
     ) -> str:
-        """Send a chat completion request and return the assistant message text."""
+        """Send a chat completion request and return the assistant message text.
+
+        json_mode asks the provider to return a bare JSON object (OpenAI
+        response_format / Gemini responseMimeType). Gemini otherwise wraps JSON
+        in markdown fences and occasionally emits malformed JSON.
+        """
         # Qwen3 optimization: prepend /no_think to the first user message to
         # skip chain-of-thought reasoning, saving tokens on structured tasks.
         # Most prompts lead with a system message, so look past it.
@@ -232,11 +272,12 @@ class LLMClient:
 
         for attempt in range(_MAX_RETRIES):
             try:
+                self._pace()
                 # Route to native Gemini if we've already confirmed it's needed
                 if self._use_native_gemini:
-                    return self._chat_native_gemini(messages, temperature, max_tokens)
+                    return self._chat_native_gemini(messages, temperature, max_tokens, json_mode)
 
-                return self._chat_compat(messages, temperature, max_tokens)
+                return self._chat_compat(messages, temperature, max_tokens, json_mode)
 
             except _GeminiCompatForbidden as exc:
                 # Model not available on OpenAI-compat layer — switch to native.
@@ -249,7 +290,7 @@ class LLMClient:
                 self._use_native_gemini = True
                 # Retry immediately with native — don't count as a rate-limit wait
                 try:
-                    return self._chat_native_gemini(messages, temperature, max_tokens)
+                    return self._chat_native_gemini(messages, temperature, max_tokens, json_mode)
                 except httpx.HTTPStatusError as native_exc:
                     raise RuntimeError(
                         f"Both Gemini endpoints failed. Compat: 403 Forbidden. "
@@ -259,24 +300,18 @@ class LLMClient:
 
             except httpx.HTTPStatusError as exc:
                 resp = exc.response
+                if resp.status_code == 429 and _is_daily_quota(resp.text):
+                    # Retrying can't help until the quota resets (midnight Pacific
+                    # for Gemini); fail now so the stage stops quickly.
+                    raise RuntimeError(
+                        f"Daily request quota exhausted for model '{self.model}'. It resets "
+                        "tomorrow; switch LLM_MODEL or provider to continue today."
+                    ) from exc
                 if resp.status_code in (429, 503) and attempt < _MAX_RETRIES - 1:
-                    # Respect Retry-After header if provided (Gemini sends this).
-                    retry_after = (
-                        resp.headers.get("Retry-After")
-                        or resp.headers.get("X-RateLimit-Reset-Requests")
-                    )
-                    if retry_after:
-                        try:
-                            wait = float(retry_after)
-                        except (ValueError, TypeError):
-                            wait = _RATE_LIMIT_BASE_WAIT * (2 ** attempt)
-                    else:
-                        wait = min(_RATE_LIMIT_BASE_WAIT * (2 ** attempt), 60)
-
+                    wait = _retry_wait(resp, attempt)
                     log.warning(
                         "LLM rate limited (HTTP %s). Waiting %ds before retry %d/%d. "
-                        "Tip: Gemini free tier = 15 RPM. Consider a paid account "
-                        "or switching to a local model.",
+                        "Tip: set LLM_RPM in .env to pace requests under a free-tier limit.",
                         resp.status_code, wait, attempt + 1, _MAX_RETRIES,
                     )
                     time.sleep(wait)
@@ -324,6 +359,31 @@ class LLMClient:
 
     def close(self) -> None:
         self._client.close()
+
+
+_RETRY_DELAY = re.compile(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"')
+
+
+def _is_daily_quota(body: str) -> bool:
+    """True when a 429 is a per-day quota (Gemini quotaId ...PerDay...)."""
+    return "PerDay" in body
+
+
+def _retry_wait(resp: httpx.Response, attempt: int) -> float:
+    """Seconds to wait before retrying a 429/503.
+
+    Gemini puts the real delay in the error body (RetryInfo.retryDelay)
+    rather than a Retry-After header; fall back to exponential backoff.
+    """
+    match = _RETRY_DELAY.search(resp.text)
+    header = resp.headers.get("Retry-After") or resp.headers.get("X-RateLimit-Reset-Requests")
+    for candidate in (match.group(1) if match else None, header):
+        if candidate:
+            try:
+                return min(float(candidate) + 1, 120)
+            except ValueError:
+                pass
+    return min(_RATE_LIMIT_BASE_WAIT * (2 ** attempt), 60)
 
 
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.S | re.I)

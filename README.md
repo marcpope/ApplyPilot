@@ -105,7 +105,7 @@ Each stage is independent. Run them all or pick what you need.
 | DeepSeek, OpenRouter, Groq, etc. | `LLM_URL=https://api.deepseek.com/v1` `LLM_API_KEY=...` `LLM_MODEL=deepseek-chat` | Any OpenAI-compatible endpoint. Include the `/v1` path. |
 | Ollama / llama.cpp | `LLM_URL=http://localhost:11434/v1` `LLM_MODEL=qwen3:8b` | `LLM_MODEL` is the model tag (`ollama list`), not the word "ollama". Very small reasoning models (under ~7B) often fail to produce a usable score. |
 
-If `LLM_URL` is set it wins over the API keys. `applypilot doctor` sends one test request, so a wrong model name, bad key or empty quota shows up there instead of as hundreds of failed jobs.
+If `LLM_URL` is set it wins over the API keys. On a free tier, set `LLM_RPM` (requests per minute, e.g. `LLM_RPM=10`) so ApplyPilot paces itself instead of hitting 429s. `applypilot doctor` sends one test request, so a wrong model name, bad key or empty quota shows up there instead of as hundreds of failed jobs.
 
 ### Optional
 
