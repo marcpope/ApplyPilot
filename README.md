@@ -124,6 +124,7 @@ If `LLM_URL` is set it wins over the API keys. On a free tier, set `LLM_RPM` (re
 
 | Component | What It Does |
 |-----------|-------------|
+| Applicant mailbox | Any IMAP/SMTP mailbox (set `APPLY_EMAIL`, `APPLY_EMAIL_PASSWORD`, `APPLY_EMAIL_IMAP_HOST`, optionally `APPLY_EMAIL_SMTP_HOST`/`_PORT`). Auto-apply waits for verification emails there and enters the code or opens the link. Without it, the Gmail MCP server is used |
 | CapSolver API key | Solves CAPTCHAs during auto-apply (hCaptcha, reCAPTCHA, Turnstile, FunCaptcha). Without it, CAPTCHA-blocked applications just fail gracefully |
 
 > **Note:** python-jobspy is installed separately with `--no-deps` because it pins an exact numpy version in its metadata that conflicts with pip's resolver. It works fine with modern numpy at runtime.

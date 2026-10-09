@@ -69,7 +69,28 @@ if platform.system() != "Windows":
 # ---------------------------------------------------------------------------
 
 def _make_mcp_config(cdp_port: int) -> dict:
-    """Build MCP config dict for a specific CDP port."""
+    """Build MCP config dict for a specific CDP port.
+
+    Email: the applicant mailbox server (IMAP/SMTP, apply/email_mcp.py) when
+    APPLY_EMAIL is configured, otherwise the Gmail MCP server.
+    """
+    from applypilot.apply.mailbox import MailboxConfig
+
+    if MailboxConfig.from_env():
+        email_server = {
+            "email": {
+                "command": sys.executable,
+                "args": ["-m", "applypilot.apply.email_mcp"],
+                "env": {"APPLYPILOT_DIR": str(config.APP_DIR)},
+            },
+        }
+    else:
+        email_server = {
+            "gmail": {
+                "command": "npx",
+                "args": ["-y", "@gongrzhe/server-gmail-autoauth-mcp"],
+            },
+        }
     return {
         "mcpServers": {
             "playwright": {
@@ -80,10 +101,7 @@ def _make_mcp_config(cdp_port: int) -> dict:
                     f"--viewport-size={config.DEFAULTS['viewport']}",
                 ],
             },
-            "gmail": {
-                "command": "npx",
-                "args": ["-y", "@gongrzhe/server-gmail-autoauth-mcp"],
-            },
+            **email_server,
         }
     }
 
@@ -357,7 +375,7 @@ def _build_claude_cmd(model: str, mcp_config_path: str, dry_run: bool = False) -
         + _GMAIL_DISALLOWED
     )
     if dry_run:
-        disallowed += ",mcp__gmail__send_email"
+        disallowed += ",mcp__gmail__send_email,mcp__email__send_email"
     return [
         # On Windows the CLI is claude.cmd, which Popen won't find by bare name.
         shutil.which("claude") or "claude",
@@ -520,6 +538,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
                                     block.get("name", "")
                                     .replace("mcp__playwright__", "")
                                     .replace("mcp__gmail__", "gmail:")
+                                    .replace("mcp__email__", "email:")
                                 )
                                 inp = block.get("input", {})
                                 if "url" in inp:

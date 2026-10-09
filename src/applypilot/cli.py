@@ -490,6 +490,21 @@ def doctor(
         results.append(("Node.js (npx)", fail_mark,
                         "Install Node.js 18+ from nodejs.org (needed for auto-apply)"))
 
+    # Applicant mailbox (optional): lets auto-apply read verification emails
+    from applypilot.apply.mailbox import Mailbox, MailboxConfig
+    mail_cfg = MailboxConfig.from_env()
+    if mail_cfg is None:
+        results.append(("Applicant mailbox", "[dim]optional[/dim]",
+                        "Set APPLY_EMAIL, APPLY_EMAIL_PASSWORD, APPLY_EMAIL_IMAP_HOST to let auto-apply "
+                        "read verification codes (otherwise the Gmail MCP server is used)"))
+    else:
+        try:
+            Mailbox(mail_cfg)._connect().logout()
+            results.append(("Applicant mailbox", ok_mark, f"{mail_cfg.address} via {mail_cfg.imap_host}"))
+        except Exception as e:
+            results.append(("Applicant mailbox", "[red]FAIL[/red]",
+                            f"{mail_cfg.address}: IMAP login failed: {' '.join(str(e).split())[:120]}"))
+
     # CapSolver (optional)
     capsolver = os.environ.get("CAPSOLVER_API_KEY")
     if capsolver:

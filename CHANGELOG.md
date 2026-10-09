@@ -66,6 +66,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Smart extract and enrichment no longer abort a site when the page never
   reaches network idle.
 
+### Added
+- Run LLM stages on Claude, ChatGPT or Google AI subscriptions through their
+  CLIs (`LLM_PROVIDER=claude-cli|codex-cli|gemini-cli`), with per-stage
+  overrides (`LLM_PROVIDER_SCORE`, `_TAILOR`, `_COVER`, `_EXTRACT`).
+- Applicant mailbox over IMAP/SMTP: an MCP server gives the apply agent
+  `wait_for_email`, `search_emails`, `read_email` and `send_email`, with
+  verification codes and links extracted. Attachments are limited to the
+  generated PDFs.
+- `LLM_RPM` request pacing, JSON mode for tailoring, and Gemini 429
+  handling that waits the server-specified delay and stops on daily quota.
+
 ### Changed
 - `applypilot doctor` checks for the Playwright browser; README and the init
   wizard tell you to run `playwright install chromium`.
