@@ -364,12 +364,51 @@ def _build_claude_cmd(model: str, mcp_config_path: str, dry_run: bool = False) -
         "--model", model,
         "-p",
         "--mcp-config", mcp_config_path,
+        # Ignore MCP servers from the user's own Claude config (e.g. Docker's
+        # MCP Toolkit browser tools, which shadow Playwright and can't reach
+        # the resume files on the host).
+        "--strict-mcp-config",
         "--permission-mode", "bypassPermissions",
         "--no-session-persistence",
         "--disallowedTools", disallowed,
         "--output-format", "stream-json",
         "--verbose", "-",
     ]
+
+def _agent_env() -> dict[str, str]:
+    """Environment for the claude subprocess.
+
+    ANTHROPIC_API_KEY takes precedence over a Claude subscription login, so a
+    key exported for some other project would silently bill every application
+    to that API account. Pass it through only when the user opts in.
+    """
+    env = os.environ.copy()
+    env.pop("CLAUDECODE", None)
+    env.pop("CLAUDE_CODE_ENTRYPOINT", None)
+    if os.environ.get("APPLYPILOT_CLAUDE_USE_API_KEY", "").lower() not in ("1", "true", "yes"):
+        env.pop("ANTHROPIC_API_KEY", None)
+    return env
+
+
+# Output from the claude CLI that means it can't run at all (not logged in,
+# bad key, no credit). Every job would fail the same way, so stop the run.
+_CLAUDE_AUTH_ERRORS = (
+    "invalid api key", "please run /login", "not logged in", "authentication_error",
+    "credit balance is too low", "oauth token has expired", "login required",
+)
+
+
+def _diagnose_no_result(output: str, returncode: int | None) -> str:
+    """Explain an agent run that ended without a RESULT line."""
+    low = output.lower()
+    for marker in _CLAUDE_AUTH_ERRORS:
+        if marker in low:
+            return f"claude_auth:{marker}"
+    tail = " ".join(output.strip().splitlines()[-3:])[-160:] if output.strip() else ""
+    if tail:
+        return f"no_result_line (exit {returncode}): {tail}"
+    return f"no_result_line (exit {returncode}, no output)"
+
 
 def run_job(job: dict, port: int, worker_id: int = 0,
             model: str = "sonnet", dry_run: bool = False) -> tuple[str, int]:
@@ -406,9 +445,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     # Build claude command
     cmd = _build_claude_cmd(model, str(mcp_config_path), dry_run)
 
-    env = os.environ.copy()
-    env.pop("CLAUDECODE", None)
-    env.pop("CLAUDE_CODE_ENTRYPOINT", None)
+    env = _agent_env()
 
     update_state(worker_id, status="applying", job_title=job["title"],
                  company=job.get("company") or job.get("site", ""), score=job.get("fit_score", 0),
@@ -571,9 +608,11 @@ def run_job(job: dict, port: int, worker_id: int = 0,
                     return f"failed:{reason}", duration_ms
             return "failed:unknown", duration_ms
 
-        add_event(f"[W{worker_id}] NO RESULT ({elapsed}s)")
+        reason = _diagnose_no_result(output, returncode)
+        logger.warning("Worker %d: no RESULT line (%ss): %s", worker_id, elapsed, reason)
+        add_event(f"[W{worker_id}] NO RESULT ({elapsed}s): {reason[:50]}")
         update_state(worker_id, status="failed", last_action=f"no result ({elapsed}s)")
-        return "failed:no_result_line", duration_ms
+        return f"failed:{reason}", duration_ms
 
     except subprocess.TimeoutExpired:
         duration_ms = int((time.time() - start) * 1000)
@@ -709,6 +748,17 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 release_lock(job["url"])
                 logger.warning("Worker %d: agent emitted APPLIED during dry-run; not marking", worker_id)
                 add_event(f"[W{worker_id}] Dry-run: ignored stray APPLIED")
+            elif result.startswith("failed:claude_auth"):
+                # The CLI itself can't run; this isn't the job's fault and every
+                # other job would fail the same way. Keep the job and stop.
+                release_lock(job["url"])
+                add_event(f"[W{worker_id}] Claude CLI auth problem -- stopping. Run `claude` once to log in.")
+                logger.error(
+                    "Claude CLI can't authenticate (%s). Run `claude` to log in, or set "
+                    "APPLYPILOT_CLAUDE_USE_API_KEY=1 to bill ANTHROPIC_API_KEY instead.", result,
+                )
+                _stop_event.set()
+                break
             elif result == "applied":
                 mark_result(job["url"], "applied", duration_ms=duration_ms)
                 applied += 1

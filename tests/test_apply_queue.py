@@ -71,3 +71,41 @@ def test_dry_run_prompt_forbids_accounts(tmp_path, monkeypatch):
     real = prompt_mod.build_prompt(job=job, tailored_resume="r", dry_run=False)
     assert "do NOT sign in, create an account" in dry
     assert "do NOT sign in, create an account" not in real
+
+
+def test_agent_env_drops_anthropic_key_unless_opted_in(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+    monkeypatch.delenv("APPLYPILOT_CLAUDE_USE_API_KEY", raising=False)
+    assert "ANTHROPIC_API_KEY" not in launcher._agent_env()
+    monkeypatch.setenv("APPLYPILOT_CLAUDE_USE_API_KEY", "1")
+    assert launcher._agent_env()["ANTHROPIC_API_KEY"] == "sk-ant-x"
+
+
+def test_strict_mcp_config_flag():
+    assert "--strict-mcp-config" in launcher._build_claude_cmd("sonnet", "mcp.json")
+
+
+def test_no_result_diagnosis():
+    assert launcher._diagnose_no_result("Invalid API key · Please run /login", 1).startswith("claude_auth")
+    assert "Chrome crashed" in launcher._diagnose_no_result("step 1\nstep 2\nChrome crashed", 1)
+    assert "no output" in launcher._diagnose_no_result("", 1)
+
+
+def test_auth_failure_stops_worker_without_burning_attempt(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr(launcher, "_load_blocked", lambda: ([], []))
+    monkeypatch.setattr(launcher, "launch_chrome", lambda *a, **kw: None)
+    monkeypatch.setattr(launcher, "cleanup_worker", lambda *a, **kw: None)
+    monkeypatch.setattr(launcher, "run_job", lambda *a, **kw: ("failed:claude_auth:not logged in", 10))
+    launcher._stop_event.clear()
+    conn = db.init_db()
+    _seed(conn, "https://e.com/a")
+    _seed(conn, "https://e.com/b")
+    try:
+        applied, failed = launcher.worker_loop(worker_id=0, limit=0)
+    finally:
+        stopped = launcher._stop_event.is_set()
+        launcher._stop_event.clear()
+    assert stopped and applied == 0
+    rows = conn.execute("SELECT apply_status, COALESCE(apply_attempts, 0) FROM jobs").fetchall()
+    assert all(r[0] is None and r[1] == 0 for r in rows)

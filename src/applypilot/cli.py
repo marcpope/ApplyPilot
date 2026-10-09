@@ -435,6 +435,14 @@ def doctor(
     claude_bin = shutil.which("claude")
     if claude_bin:
         results.append(("Claude Code CLI", ok_mark, claude_bin))
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            if os.environ.get("APPLYPILOT_CLAUDE_USE_API_KEY", "").lower() in ("1", "true", "yes"):
+                results.append(("Claude auth", warn_mark,
+                                "Auto-apply bills ANTHROPIC_API_KEY (APPLYPILOT_CLAUDE_USE_API_KEY is set)"))
+            else:
+                results.append(("Claude auth", ok_mark,
+                                "ANTHROPIC_API_KEY is ignored for auto-apply; your `claude` login is used. "
+                                "Set APPLYPILOT_CLAUDE_USE_API_KEY=1 to bill the key instead"))
     else:
         results.append(("Claude Code CLI", fail_mark,
                         "Install from https://claude.ai/code (needed for auto-apply)"))
