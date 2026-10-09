@@ -1,5 +1,4 @@
 """Apply queue: status count matches the queue; hung agents time out; Windows CLI lookup."""
-import subprocess
 import sys
 
 import applypilot.apply.launcher as launcher
