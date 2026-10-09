@@ -74,7 +74,7 @@ def generate_dashboard(output_path: str | None = None) -> str:
 
     # All scored jobs (5+), ordered by score desc
     jobs = conn.execute("""
-        SELECT url, title, salary, description, location, site, strategy,
+        SELECT url, title, company, salary, description, location, site, strategy,
                full_description, application_url, detail_error,
                fit_score, score_reasoning
         FROM jobs
@@ -165,6 +165,9 @@ def generate_dashboard(output_path: str | None = None) -> str:
         desc_len = len(j["full_description"] or "")
 
         meta_parts = []
+        company = escape(j["company"] or "")
+        if company and company.lower() != site.lower():
+            meta_parts.append(f'<span class="meta-tag company">{company}</span>')
         meta_parts.append(
             f'<span class="meta-tag site-tag" style="background:{site_color}33;color:{site_color}">{site}</span>'
         )

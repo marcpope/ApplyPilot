@@ -199,15 +199,28 @@ def apply(
 
     # Check 3: Tailored resumes exist (skip for --gen with --url)
     if not (gen and url):
+        from applypilot.database import count_ready_to_apply
         conn = get_connection()
-        ready = conn.execute(
-            "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL AND applied_at IS NULL"
-        ).fetchone()[0]
-        if ready == 0:
-            console.print(
-                "[red]No tailored resumes ready.[/red]\n"
-                "Run [bold]applypilot run score tailor[/bold] first to prepare applications."
-            )
+        ready = count_ready_to_apply(conn, min_score=min_score)
+        if ready == 0 and not url:
+            tailored = conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL AND applied_at IS NULL"
+            ).fetchone()[0]
+            if tailored:
+                console.print(
+                    f"[red]No jobs ready to apply.[/red] {tailored} tailored job(s) are below "
+                    f"--min-score {min_score}, already attempted the maximum number of times, "
+                    "or were marked manual/permanently failed.\n"
+                    "Retry failures with [bold]applypilot apply --reset-failed[/bold], or lower "
+                    "[bold]--min-score[/bold]."
+                )
+            else:
+                console.print(
+                    "[red]No tailored resumes ready.[/red]\n"
+                    "Run [bold]applypilot run score tailor[/bold] first to prepare applications.\n"
+                    "If that tailors nothing, run [bold]applypilot status[/bold]: jobs need a fit "
+                    "score at or above --min-score to be tailored."
+                )
             raise typer.Exit(code=1)
 
     if gen:
@@ -333,7 +346,10 @@ def dashboard() -> None:
 
 
 @app.command()
-def doctor() -> None:
+def doctor(
+    skip_llm_test: bool = typer.Option(False, "--skip-llm-test",
+                                       help="Don't send a test request to the LLM provider."),
+) -> None:
     """Check your setup and diagnose missing requirements."""
     import shutil
     from applypilot.config import (
@@ -353,6 +369,16 @@ def doctor() -> None:
     # Profile
     if PROFILE_PATH.exists():
         results.append(("profile.json", ok_mark, str(PROFILE_PATH)))
+        try:
+            import json
+            profile = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+        except Exception as e:
+            results.append(("profile.json", fail_mark, f"Invalid JSON: {e}"))
+        else:
+            if not profile.get("screening"):
+                results.append(("screening answers", warn_mark,
+                                "No 'screening' section: auto-apply will stop on age/background/felony "
+                                "questions. Add it (see profile.example.json) or re-run 'applypilot init'"))
     else:
         results.append(("profile.json", fail_mark, "Run 'applypilot init' to create"))
 
@@ -376,24 +402,33 @@ def doctor() -> None:
         results.append(("python-jobspy", ok_mark, "Job board scraping available"))
     except ImportError:
         results.append(("python-jobspy", warn_mark,
-                        "pip install --no-deps python-jobspy && pip install pydantic tls-client requests markdownify regex"))
+                        "pip install --no-deps python-jobspy && "
+                        "pip install pydantic tls-client requests markdownify regex curl_cffi"))
 
     # --- Tier 2 checks ---
     import os
-    has_gemini = bool(os.environ.get("GEMINI_API_KEY"))
-    has_openai = bool(os.environ.get("OPENAI_API_KEY"))
-    has_local = bool(os.environ.get("LLM_URL"))
-    if has_gemini:
-        model = os.environ.get("LLM_MODEL", "gemini-2.0-flash")
-        results.append(("LLM API key", ok_mark, f"Gemini ({model})"))
-    elif has_openai:
-        model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
-        results.append(("LLM API key", ok_mark, f"OpenAI ({model})"))
-    elif has_local:
-        results.append(("LLM API key", ok_mark, f"Local: {os.environ.get('LLM_URL')}"))
+    from applypilot.llm import LLMClient, _detect_provider
+    try:
+        base_url, model, api_key = _detect_provider()
+    except RuntimeError:
+        results.append(("LLM provider", fail_mark,
+                        "Set GEMINI_API_KEY, OPENAI_API_KEY or LLM_URL in ~/.applypilot/.env "
+                        "(run 'applypilot init')"))
     else:
-        results.append(("LLM API key", fail_mark,
-                        "Set GEMINI_API_KEY in ~/.applypilot/.env (run 'applypilot init')"))
+        results.append(("LLM provider", ok_mark, f"{base_url}  model: {model}"))
+        if skip_llm_test:
+            results.append(("LLM test request", "[dim]skipped[/dim]", ""))
+        else:
+            client = LLMClient(base_url, model, api_key)
+            try:
+                client.check()
+                results.append(("LLM test request", ok_mark, "model answered"))
+            except Exception as e:
+                reason = " ".join(str(e).split())[:200]
+                results.append(("LLM test request", "[red]FAIL[/red]",
+                                f"{reason} -- check the key, LLM_MODEL and quota"))
+            finally:
+                client.close()
 
     # --- Tier 3 checks ---
     # Claude Code CLI

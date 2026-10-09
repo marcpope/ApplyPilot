@@ -11,6 +11,7 @@ import logging
 import os
 import platform
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -24,7 +25,7 @@ from rich.console import Console
 from rich.live import Live
 
 from applypilot import config
-from applypilot.database import get_connection
+from applypilot.database import READY_TO_APPLY_SQL, get_connection
 from applypilot.apply import chrome, dashboard, prompt as prompt_mod
 from applypilot.apply.chrome import (
     launch_chrome, cleanup_worker, kill_all_chrome,
@@ -51,6 +52,10 @@ _stop_event = threading.Event()
 
 # Track active Claude Code processes for skip (Ctrl+C) handling
 _claude_procs: dict[int, subprocess.Popen] = {}
+
+# Hard ceiling per application. The agent's stdout loop has no timeout of its
+# own, so a hung browser session used to block its worker forever.
+JOB_TIMEOUT_S = int(os.environ.get("APPLYPILOT_JOB_TIMEOUT", "900"))
 _claude_lock = threading.Lock()
 
 # Register cleanup on exit
@@ -129,7 +134,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
         else:
             blocked_sites, blocked_patterns = _load_blocked()
             # Build parameterized filters to avoid SQL injection
-            params: list = [min_score]
+            params: list = [config.DEFAULTS["max_apply_attempts"], min_score]
             site_clause = ""
             if blocked_sites:
                 placeholders = ",".join("?" * len(blocked_sites))
@@ -143,15 +148,12 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                 SELECT url, title, company, site, application_url, tailored_resume_path,
                        fit_score, location, full_description, cover_letter_path
                 FROM jobs
-                WHERE tailored_resume_path IS NOT NULL
-                  AND (apply_status IS NULL OR apply_status = 'failed')
-                  AND (apply_attempts IS NULL OR apply_attempts < ?)
-                  AND fit_score >= ?
+                WHERE {READY_TO_APPLY_SQL}
                   {site_clause}
                   {url_clauses}
                 ORDER BY fit_score DESC, url
                 LIMIT 1
-            """, [config.DEFAULTS["max_apply_attempts"]] + params).fetchone()
+            """, params).fetchone()
 
         if not row:
             conn.rollback()
@@ -357,7 +359,8 @@ def _build_claude_cmd(model: str, mcp_config_path: str, dry_run: bool = False) -
     if dry_run:
         disallowed += ",mcp__gmail__send_email"
     return [
-        "claude",
+        # On Windows the CLI is claude.cmd, which Popen won't find by bare name.
+        shutil.which("claude") or "claude",
         "--model", model,
         "-p",
         "--mcp-config", mcp_config_path,
@@ -425,6 +428,8 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     start = time.time()
     stats: dict = {}
     proc = None
+    watchdog: threading.Timer | None = None
+    timed_out = threading.Event()
 
     try:
         proc = subprocess.Popen(
@@ -437,9 +442,21 @@ def run_job(job: dict, port: int, worker_id: int = 0,
             errors="replace",
             env=env,
             cwd=str(worker_dir),
+            # Own process group, like Chrome: _kill_process_tree() uses killpg,
+            # and in ApplyPilot's group it would SIGKILL ApplyPilot itself
+            # (this is what Ctrl+C "skip current job" used to do).
+            start_new_session=platform.system() != "Windows",
         )
         with _claude_lock:
             _claude_procs[worker_id] = proc
+
+        def _on_timeout(pid: int = proc.pid) -> None:
+            timed_out.set()
+            _kill_process_tree(pid)
+
+        watchdog = threading.Timer(JOB_TIMEOUT_S, _on_timeout)
+        watchdog.daemon = True
+        watchdog.start()
 
         proc.stdin.write(agent_prompt)
         proc.stdin.close()
@@ -503,6 +520,9 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         returncode = proc.returncode
         proc = None
 
+        if timed_out.is_set():
+            # Killed by the watchdog: a real failure, not a user interrupt.
+            raise subprocess.TimeoutExpired(cmd, JOB_TIMEOUT_S)
         if returncode and returncode < 0:
             return "skipped", int((time.time() - start) * 1000)
 
@@ -567,6 +587,8 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         update_state(worker_id, status="failed", last_action=f"ERROR: {str(e)[:25]}")
         return f"failed:{str(e)[:100]}", duration_ms
     finally:
+        if watchdog is not None:
+            watchdog.cancel()
         with _claude_lock:
             _claude_procs.pop(worker_id, None)
         if proc is not None and proc.poll() is None:

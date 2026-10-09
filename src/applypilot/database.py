@@ -229,6 +229,27 @@ def ensure_columns(conn: sqlite3.Connection | None = None) -> list[str]:
     return added
 
 
+# The apply queue's definition of "ready": tailored, never applied, not
+# locked or permanently failed, and attempts left. `status`, the CLI pre-check
+# and the queue itself all use this so their counts agree. Parameters:
+# max_apply_attempts, min_score.
+READY_TO_APPLY_SQL = (
+    "tailored_resume_path IS NOT NULL AND applied_at IS NULL "
+    "AND (apply_status IS NULL OR apply_status = 'failed') "
+    "AND COALESCE(apply_attempts, 0) < ? "
+    "AND fit_score >= ?"
+)
+
+
+def count_ready_to_apply(conn: sqlite3.Connection, min_score: int = 7) -> int:
+    """Number of jobs the apply queue would pick up (before blocked-site filters)."""
+    from applypilot.config import DEFAULTS
+    return conn.execute(
+        f"SELECT COUNT(*) FROM jobs WHERE {READY_TO_APPLY_SQL}",
+        (DEFAULTS["max_apply_attempts"], min_score),
+    ).fetchone()[0]
+
+
 def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     """Return job counts by pipeline stage.
 
@@ -326,12 +347,7 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
         "SELECT COUNT(*) FROM jobs WHERE apply_error IS NOT NULL"
     ).fetchone()[0]
 
-    stats["ready_to_apply"] = conn.execute(
-        "SELECT COUNT(*) FROM jobs "
-        "WHERE tailored_resume_path IS NOT NULL "
-        "AND applied_at IS NULL "
-        "AND application_url IS NOT NULL"
-    ).fetchone()[0]
+    stats["ready_to_apply"] = count_ready_to_apply(conn)
 
     return stats
 

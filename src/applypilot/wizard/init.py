@@ -28,16 +28,21 @@ from applypilot.config import (
     ensure_dirs,
     write_private_text,
 )
+from applypilot.llm import DEFAULT_GEMINI_MODEL
 
 console = Console()
 
+# Keys that select an LLM provider; switching providers clears the others.
+_PROVIDER_KEYS = frozenset({"GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL", "LLM_API_KEY", "LLM_MODEL"})
 
-def _merge_env(existing_text: str, new_pairs: dict) -> str:
+
+def _merge_env(existing_text: str, new_pairs: dict, remove: set[str] | frozenset[str] = frozenset()) -> str:
     """Merge new KEY=VALUE pairs into an existing .env, preserving everything else.
 
     Re-running init must not silently drop keys the user set elsewhere (a
     CapSolver key, a manual CHROME_PATH). Unknown keys and comments are kept;
-    keys present in new_pairs are overwritten in place.
+    keys present in new_pairs are overwritten in place; keys in ``remove`` are
+    dropped.
     """
     lines = existing_text.splitlines()
     out: list[str] = []
@@ -48,6 +53,8 @@ def _merge_env(existing_text: str, new_pairs: dict) -> str:
             out.append(line)
             continue
         key = stripped.split("=", 1)[0].strip()
+        if key in remove and key not in new_pairs:
+            continue
         if key in new_pairs:
             out.append(f"{key}={new_pairs[key]}")
             seen.add(key)
@@ -118,6 +125,21 @@ def _setup_resume() -> None:
 # Profile
 # ---------------------------------------------------------------------------
 
+def _ask_screening() -> dict:
+    """Ask the screening questions application forms commonly require.
+
+    These are submitted to real employers and some are legally significant,
+    so they're collected explicitly instead of hardcoded.
+    """
+    console.print("\n[bold]Screening questions[/bold] (used to auto-answer application forms)")
+    return {
+        "age_18_plus": Confirm.ask("Are you 18 or older?", default=True),
+        "consents_to_background_check": Confirm.ask("Do you consent to a background check?", default=True),
+        "felony_conviction": Confirm.ask("Have you been convicted of a felony?", default=False),
+        "how_heard": Prompt.ask("How did you hear about jobs you apply to?", default="Online Job Board"),
+    }
+
+
 def _setup_profile() -> dict:
     """Walk through profile questions and return a nested profile dict."""
     console.print(Panel("[bold]Step 2: Profile[/bold]\nTell ApplyPilot about yourself. This powers scoring, tailoring, and auto-fill."))
@@ -126,7 +148,14 @@ def _setup_profile() -> dict:
         f"profile.json already exists at {PROFILE_PATH} — overwrite?", default=False
     ):
         console.print("[dim]Keeping existing profile.json[/dim]")
-        return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+        profile = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+        if not profile.get("screening"):
+            # Profiles from older versions lack these; auto-apply stops on
+            # screening questions until they're answered.
+            profile["screening"] = _ask_screening()
+            write_private_text(PROFILE_PATH, json.dumps(profile, indent=2, ensure_ascii=False))
+            console.print(f"[green]Screening answers added to {PROFILE_PATH}[/green]")
+        return profile
 
     profile: dict = {}
 
@@ -215,16 +244,7 @@ def _setup_profile() -> dict:
         "disability_status": "Decline to self-identify",
     }
 
-    # -- Screening --
-    # These are submitted to real employers; some are legally significant, so
-    # collect them explicitly instead of hardcoding answers.
-    console.print("\n[bold]Screening questions[/bold] (used to auto-answer application forms)")
-    profile["screening"] = {
-        "age_18_plus": Confirm.ask("Are you 18 or older?", default=True),
-        "consents_to_background_check": Confirm.ask("Do you consent to a background check?", default=True),
-        "felony_conviction": Confirm.ask("Have you been convicted of a felony?", default=False),
-        "how_heard": Prompt.ask("How did you hear about jobs you apply to?", default="Online Job Board"),
-    }
+    profile["screening"] = _ask_screening()
 
     # -- Availability --
     profile["availability"] = {
@@ -308,10 +328,16 @@ def _setup_ai_features() -> None:
         console.print("[dim]Discovery-only mode. You can configure AI later with [bold]applypilot init[/bold].[/dim]")
         return
 
-    console.print("Supported providers: [bold]Gemini[/bold] (recommended, free tier), OpenAI, local (Ollama/llama.cpp)")
+    console.print(
+        "Supported providers:\n"
+        "  [bold]gemini[/bold]  Google AI Studio key (free tier has low daily limits)\n"
+        "  [bold]openai[/bold]  OpenAI API key\n"
+        "  [bold]compatible[/bold]  any OpenAI-compatible API: DeepSeek, OpenRouter, Groq, "
+        "or a local Ollama / llama.cpp server"
+    )
     provider = Prompt.ask(
         "Provider",
-        choices=["gemini", "openai", "local"],
+        choices=["gemini", "openai", "compatible", "local"],
         default="gemini",
     )
 
@@ -320,19 +346,27 @@ def _setup_ai_features() -> None:
     if provider == "gemini":
         api_key = Prompt.ask("Gemini API key (from aistudio.google.com)")
         new_pairs["GEMINI_API_KEY"] = api_key
-        new_pairs["LLM_MODEL"] = Prompt.ask("Model", default="gemini-2.0-flash")
+        new_pairs["LLM_MODEL"] = Prompt.ask("Model", default=DEFAULT_GEMINI_MODEL)
     elif provider == "openai":
         api_key = Prompt.ask("OpenAI API key")
         new_pairs["OPENAI_API_KEY"] = api_key
         new_pairs["LLM_MODEL"] = Prompt.ask("Model", default="gpt-4o-mini")
-    elif provider == "local":
-        new_pairs["LLM_URL"] = Prompt.ask("Local LLM endpoint URL", default="http://localhost:8080/v1")
-        new_pairs["LLM_MODEL"] = Prompt.ask("Model name", default="local-model")
+    else:  # "compatible" (or the old "local" spelling)
+        new_pairs["LLM_URL"] = Prompt.ask(
+            "API base URL (e.g. https://api.deepseek.com/v1, http://localhost:11434/v1)",
+            default="http://localhost:11434/v1",
+        )
+        new_pairs["LLM_MODEL"] = Prompt.ask("Model name (e.g. deepseek-chat, qwen3:8b)")
+        api_key = Prompt.ask("API key (leave blank for a local server)", default="", password=True)
+        if api_key:
+            new_pairs["LLM_API_KEY"] = api_key
 
     # Merge into any existing .env so previously saved keys (e.g. a CapSolver
-    # key, or a manually added CHROME_PATH) survive a re-run of init.
+    # key, or a manually added CHROME_PATH) survive a re-run of init. Drop the
+    # other providers' keys: detection order would otherwise keep using them
+    # (LLM_URL wins over GEMINI_API_KEY, which wins over OPENAI_API_KEY).
     existing = ENV_PATH.read_text(encoding="utf-8") if ENV_PATH.exists() else ""
-    write_private_text(ENV_PATH, _merge_env(existing, new_pairs))
+    write_private_text(ENV_PATH, _merge_env(existing, new_pairs, remove=_PROVIDER_KEYS))
     console.print(f"[green]AI configuration saved to {ENV_PATH}[/green]")
 
 

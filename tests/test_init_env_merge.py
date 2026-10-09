@@ -28,3 +28,13 @@ def test_merge_keeps_comments():
     out = _merge_env("# my notes\nCAPSOLVER_API_KEY=x", {"LLM_MODEL": "m"})
     assert "# my notes" in out
     assert "CAPSOLVER_API_KEY=x" in out
+
+
+def test_switching_provider_drops_old_provider_keys():
+    from applypilot.wizard.init import _PROVIDER_KEYS
+    existing = "GEMINI_API_KEY=g\nLLM_MODEL=gemini-2.0-flash\nCAPSOLVER_API_KEY=c\n"
+    out = _merge_env(existing, {"LLM_URL": "https://api.deepseek.com/v1", "LLM_MODEL": "deepseek-chat",
+                                "LLM_API_KEY": "sk"}, remove=_PROVIDER_KEYS)
+    assert "GEMINI_API_KEY" not in out
+    assert "LLM_MODEL=deepseek-chat" in out
+    assert "CAPSOLVER_API_KEY=c" in out

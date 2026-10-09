@@ -301,6 +301,23 @@ class LLMClient:
 
         raise RuntimeError("LLM request failed after all retries")
 
+    def check(self) -> str:
+        """Send one tiny request without retries; raise with the reason on failure.
+
+        Used by `applypilot doctor` so a dead model name, bad key or exhausted
+        quota shows up before a run instead of as hundreds of failed jobs.
+        """
+        messages = [{"role": "user", "content": "Reply with the single word OK."}]
+        try:
+            if self._use_native_gemini:
+                return self._chat_native_gemini(messages, 0.0, 1024)
+            return self._chat_compat(messages, 0.0, 1024)
+        except _GeminiCompatForbidden:
+            self._use_native_gemini = True
+            return self._chat_native_gemini(messages, 0.0, 1024)
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(f"HTTP {exc.response.status_code}: {exc.response.text[:200]}") from exc
+
     def ask(self, prompt: str, **kwargs) -> str:
         """Convenience: single user prompt -> assistant response."""
         return self.chat([{"role": "user", "content": prompt}], **kwargs)
